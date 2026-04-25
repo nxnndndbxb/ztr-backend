@@ -1,5 +1,5 @@
 {
-  "name": "ztr-backend",
+  "name": "ztr-secure-backend",
   "version": "1.0.0",
   "main": "api/index.js",
   "dependencies": {
