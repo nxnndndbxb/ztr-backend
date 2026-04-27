@@ -40,11 +40,8 @@ async function verifyTransaction(txHash, fromWallet, toWallet, expectedAmount) {
             console.log(`Verification failed for ${txHash}: Invalid receipt or transaction failed.`);
             return false;
         }
-
         const decimals = await usdtContract.decimals();
-        // We convert the expected amount to the smallest unit (wei for ETH, or similar for tokens)
         const expectedAmountWei = ethers.parseUnits(expectedAmount, decimals);
-
         let transactionValid = false;
         for (const log of receipt.logs) {
             if (log.address.toLowerCase() === USDT_CONTRACT.toLowerCase()) {
@@ -55,20 +52,16 @@ async function verifyTransaction(txHash, fromWallet, toWallet, expectedAmount) {
                         if (
                             from.toLowerCase() === fromWallet.toLowerCase() &&
                             to.toLowerCase() === toWallet.toLowerCase() &&
-                            value >= expectedAmountWei // Check if sent amount is AT LEAST what was expected
+                            value >= expectedAmountWei
                         ) {
                             transactionValid = true;
                             break;
                         }
                     }
-                } catch(e) {
-                    // Ignore logs that cannot be parsed by this ABI
-                }
+                } catch(e) {}
             }
         }
-        
         return transactionValid;
-
     } catch (e) {
         console.error(`Error verifying transaction ${txHash}:`, e);
         return false;
@@ -94,21 +87,18 @@ async function generateInviteCode() {
 
 async function distributeCommissions(newUserWallet, inviterId) {
     console.log(`Starting commission distribution for new user: ${newUserWallet} invited by ID: ${inviterId}`);
-    // Commission logic to be implemented here
+    // Commission logic yahan implement hogi
 }
 
 // --- API ENDPOINTS ---
 
 app.post('/api/register', async (req, res) => {
-    // Read the dynamic registration cost from the request body sent by the frontend
     const { wallet, txHash, inviterId, username, profilePic, registrationCost } = req.body;
     
     if (!wallet || !txHash || !inviterId || !username || !registrationCost) {
         return res.status(400).json({ success: false, error: "Missing required fields." });
     }
 
-    // --- MAIN FIX IS HERE ---
-    // Verify the transaction using the registrationCost provided by the frontend
     const isValid = await verifyTransaction(txHash, wallet, ADMIN_WALLET, registrationCost); 
     if (!isValid) {
         return res.status(400).json({ success: false, error: "Transaction verification failed. Please ensure the correct amount was sent." });
@@ -117,12 +107,18 @@ app.post('/api/register', async (req, res) => {
     const walletLower = wallet.toLowerCase();
     const userRef = db.ref(`users/${walletLower}`);
     
-    const snapshot = await userRef.once('value');
-    if (snapshot.exists()) {
-        return res.status(400).json({ success: false, error: "User is already registered." });
-    }
-
     try {
+        const snapshot = await userRef.once('value');
+        const userData = snapshot.val();
+
+        // --- YEH HAI PERMANENT SOLUTION ---
+        // Agar user ka record hai, lekin profile nahi hai, to use update karein.
+        if (snapshot.exists() && userData.profile) {
+            // User poori tarah se registered hai, ab error dein.
+            return res.status(400).json({ success: false, error: "User is already registered." });
+        }
+        
+        // Agar yahan tak pohnch gaye, to ya to user naya hai ya adhoora hai. Dono cases mein profile banayein/update karein.
         const nextIdRef = db.ref('nextUserId');
         const idResult = await nextIdRef.transaction(currentId => (currentId || 1000) + 1);
         if (!idResult.committed) {
@@ -132,7 +128,7 @@ app.post('/api/register', async (req, res) => {
         
         const inviteCode = await generateInviteCode();
 
-        const newUser = {
+        const fullUserRecord = {
             profile: {
                 name: username,
                 userId: userId,
@@ -142,19 +138,20 @@ app.post('/api/register', async (req, res) => {
             },
             inviteCode: inviteCode,
             inviterId: parseInt(inviterId),
-            paid: true,
+            paid: true, // paid status bhi yahan set ho jayega
             ztrBalance: 0,
             level: 0,
             teamSize: 0
         };
 
-        await userRef.set(newUser);
+        // set() function naya record banayega ya purane adhoore record ko overwrite kar dega.
+        await userRef.set(fullUserRecord); 
         await db.ref(`userIdMap/${userId}`).set(walletLower);
         await db.ref(`inviteCodeMap/${inviteCode}`).set(walletLower);
 
         await distributeCommissions(walletLower, parseInt(inviterId));
         
-        res.status(201).json({ success: true, profile: newUser.profile });
+        res.status(201).json({ success: true, profile: fullUserRecord.profile });
 
     } catch (error) {
         console.error("Registration failed:", error);
@@ -164,7 +161,6 @@ app.post('/api/register', async (req, res) => {
 
 
 app.post('/api/upgrade', async (req, res) => {
-    // Frontend must send the calculated upgradeCost
     const { wallet, txHash, levelId, upgradeCost } = req.body;
     const isValid = await verifyTransaction(txHash, wallet, ADMIN_WALLET, upgradeCost);
     if (!isValid) {
@@ -182,12 +178,7 @@ app.post('/api/withdraw', async (req, res) => {
     if (!userData || userData.ztrBalance <= 0) {
         return res.status(400).json({ success: false, error: "No balance to withdraw or user not found." });
     }
-    const withdrawalRequest = { 
-        userWallet: wallet.toLowerCase(), 
-        amount: userData.ztrBalance, 
-        status: 'pending', 
-        date: new Date().toISOString() 
-    };
+    const withdrawalRequest = { userWallet: wallet.toLowerCase(), amount: userData.ztrBalance, status: 'pending', date: new Date().toISOString() };
     await db.ref('withdrawals').push(withdrawalRequest);
     await userRef.child('ztrBalance').set(0);
     res.json({ success: true });
