@@ -33,6 +33,9 @@ const usdtAbi = [
 ];
 const usdtContract = new ethers.Contract(USDT_CONTRACT, usdtAbi, provider);
 
+/**
+ * Verifies a USDT transaction on the BSC network.
+ */
 async function verifyTransaction(txHash, fromWallet, toWallet, expectedAmount) {
     try {
         const receipt = await provider.getTransactionReceipt(txHash);
@@ -42,7 +45,7 @@ async function verifyTransaction(txHash, fromWallet, toWallet, expectedAmount) {
         }
         const decimals = await usdtContract.decimals();
         const expectedAmountWei = ethers.parseUnits(expectedAmount.toString(), decimals);
-        let transactionValid = false;
+        
         for (const log of receipt.logs) {
             if (log.address.toLowerCase() === USDT_CONTRACT.toLowerCase()) {
                 try {
@@ -54,20 +57,24 @@ async function verifyTransaction(txHash, fromWallet, toWallet, expectedAmount) {
                             to.toLowerCase() === toWallet.toLowerCase() &&
                             value >= expectedAmountWei
                         ) {
-                            transactionValid = true;
-                            break;
+                            return true; // Transaction is valid
                         }
                     }
-                } catch(e) {}
+                } catch(e) {
+                    // Ignore parsing errors from other logs
+                }
             }
         }
-        return transactionValid;
+        return false; // No matching Transfer event found
     } catch (e) {
         console.error(`Error verifying transaction ${txHash}:`, e);
         return false;
     }
 }
 
+/**
+ * Generates a unique 8-character invite code.
+ */
 async function generateInviteCode() {
     let code;
     let isUnique = false;
@@ -85,33 +92,125 @@ async function generateInviteCode() {
     return code;
 }
 
-// Recursively update team size for all upliners
-async function updateUplineTeamSize(inviterId) {
-    if (!inviterId || inviterId === 0) return;
-    try {
-        const inviterWalletRef = db.ref(`userIdMap/${inviterId}`);
-        const inviterWalletSnap = await inviterWalletRef.once('value');
-        if (inviterWalletSnap.exists()) {
-            const inviterWallet = inviterWalletSnap.val();
-            const inviterRef = db.ref(`users/${inviterWallet}`);
-            await inviterRef.child('teamSize').transaction(currentSize => (currentSize || 0) + 1);
+/**
+ * [NEW] Distributes registration commissions to the network.
+ * Commission Structure: 55% to Direct, 7% to Upline-1, 20% split among Direct's team.
+ * @param {string} inviterId - The user ID of the direct inviter.
+ * @param {number} registrationCost - The cost of registration in USDT.
+ */
+async function distributeCommissions(inviterId, registrationCost) {
+    console.log(`Starting commission distribution for inviter ID: ${inviterId}`);
+    
+    // Fetch ZTR price and level config from DB to determine commissionable amount
+    const configSnapshot = await db.ref('config').once('value');
+    const config = configSnapshot.val();
+    const baseZTRPrice = config.baseZTRPrice || 1;
+    const level1Price = config.levels?.[0]?.price;
 
-            const grandparentRef = inviterRef.child('inviterId');
-            const grandparentSnap = await grandparentRef.once('value');
-            if (grandparentSnap.exists()) {
-                await updateUplineTeamSize(grandparentSnap.val());
+    if (!level1Price) {
+        console.error("FATAL: Level 1 price is not configured in the database. Commissions cannot be distributed.");
+        return;
+    }
+
+    const commissionableAmountInZTR = level1Price; // Commissions are based on Level 1 price
+    console.log(`Commissionable Amount: ${commissionableAmountInZTR} ZTR`);
+
+    // Helper to safely add balance and record history
+    const addCommission = async (userId, amount, type) => {
+        if (!userId || isNaN(userId)) return;
+        const walletSnapshot = await db.ref(`userIdMap/${userId}`).once('value');
+        if (!walletSnapshot.exists()) return;
+        
+        const wallet = walletSnapshot.val();
+        const userRef = db.ref(`users/${wallet}`);
+        
+        await userRef.child('ztrBalance').transaction(balance => (balance || 0) + amount);
+        await userRef.child('incomeHistory').push({
+            amount: amount,
+            type: type,
+            date: new Date().toISOString()
+        });
+        console.log(`Credited ${amount} ZTR to User ID ${userId} (${type})`);
+    };
+
+    // 1. Direct Commission (55%)
+    const directCommission = commissionableAmountInZTR * 0.55;
+    await addCommission(inviterId, directCommission, 'Direct Commission');
+
+    // 2. Upline Commission (7%)
+    const inviterWallet = (await db.ref(`userIdMap/${inviterId}`).once('value')).val();
+    if (inviterWallet) {
+        const inviterData = (await db.ref(`users/${inviterWallet}`).once('value')).val();
+        if (inviterData && inviterData.inviterId) {
+            const uplineId = inviterData.inviterId;
+            const uplineCommission = commissionableAmountInZTR * 0.07;
+            await addCommission(uplineId, uplineCommission, 'Upline Commission');
+        }
+    }
+
+    // 3. Team Split Commission (20%)
+    const teamCommissionPool = commissionableAmountInZTR * 0.20;
+    const teamMembersSnapshot = await db.ref('users').orderByChild('inviterId').equalTo(inviterId).once('value');
+    
+    if (teamMembersSnapshot.exists()) {
+        const team = [];
+        teamMembersSnapshot.forEach(child => {
+            // Ensure we are not including the user who just registered
+            if (child.val().profile) { // A simple check to see if the user is fully registered
+                 team.push(child.key);
+            }
+        });
+
+        if (team.length > 0) {
+            const sharePerMember = teamCommissionPool / team.length;
+            for (const memberWallet of team) {
+                const memberData = (await db.ref(`users/${memberWallet}/profile/userId`).once('value')).val();
+                if(memberData) {
+                   await addCommission(memberData, sharePerMember, 'Team Commission');
+                }
             }
         }
-    } catch (error) {
-        console.error(`Error updating team size for inviter ${inviterId}:`, error);
     }
 }
 
 
-async function distributeCommissions(newUserWallet, inviterId) {
-    console.log(`Starting commission distribution for new user: ${newUserWallet} invited by ID: ${inviterId}`);
-    // Commission logic yahan implement hogi
+/**
+ * [NEW] Distributes airdrop points for a level upgrade to both the user and their upline.
+ * Points are configured in the database under `config/levels`.
+ * @param {string} userWallet - The wallet address of the user upgrading.
+ * @param {number} levelId - The new level ID.
+ */
+async function distributeAirdropPoints(userWallet, levelId) {
+    console.log(`Distributing airdrop points for wallet ${userWallet} upgrading to level ${levelId}`);
+
+    const levels = (await db.ref('config/levels').once('value')).val();
+    const levelConfig = levels.find(l => l.id === levelId);
+
+    if (!levelConfig || !levelConfig.airdropPoints || levelConfig.airdropPoints <= 0) {
+        console.log(`No airdrop points configured for level ${levelId}.`);
+        return;
+    }
+
+    const points = levelConfig.airdropPoints;
+
+    // Award points to the user
+    const userRef = db.ref(`users/${userWallet}`);
+    await userRef.child('airdropPoints').transaction(currentPoints => (currentPoints || 0) + points);
+    console.log(`Awarded ${points} airdrop points to ${userWallet}`);
+
+    // Award points to the inviter (upline)
+    const userData = (await userRef.once('value')).val();
+    if (userData && userData.inviterId) {
+        const inviterId = userData.inviterId;
+        const inviterWallet = (await db.ref(`userIdMap/${inviterId}`).once('value')).val();
+        if (inviterWallet) {
+            const inviterRef = db.ref(`users/${inviterWallet}`);
+            await inviterRef.child('airdropPoints').transaction(currentPoints => (currentPoints || 0) + points);
+            console.log(`Awarded ${points} airdrop points to inviter ${inviterWallet}`);
+        }
+    }
 }
+
 
 // --- API ENDPOINTS ---
 
@@ -133,7 +232,7 @@ app.post('/api/register', async (req, res) => {
     try {
         const snapshot = await userRef.once('value');
         if (snapshot.exists() && snapshot.val().profile) {
-            return res.status(400).json({ success: false, error: "User is already registered." });
+            return res.status(400).json({ success: false, error: "User is already fully registered." });
         }
         
         const nextIdRef = db.ref('nextUserId');
@@ -144,21 +243,22 @@ app.post('/api/register', async (req, res) => {
         const userId = idResult.snapshot.val();
         
         const inviteCode = await generateInviteCode();
+        const parsedInviterId = parseInt(inviterId);
 
         const fullUserRecord = {
             profile: {
                 name: username,
                 userId: userId,
-                joinDate: new Date().toISOString(), // Use ISO string for consistency
+                joinDate: new Date().toLocaleDateString('en-GB'),
                 profilePicUrl: profilePic || null,
                 avatar: 'fa-user-astronaut'
             },
             inviteCode: inviteCode,
-            inviterId: parseInt(inviterId),
+            inviterId: parsedInviterId,
             paid: true,
             ztrBalance: 0,
             airdropPoints: 100, // Initial points for joining
-            level: 0,
+            level: 1, // Start at level 1
             teamSize: 0
         };
 
@@ -166,9 +266,14 @@ app.post('/api/register', async (req, res) => {
         await db.ref(`userIdMap/${userId}`).set(walletLower);
         await db.ref(`inviteCodeMap/${inviteCode}`).set(walletLower);
 
-        // Distribute commissions and update team sizes
-        await distributeCommissions(walletLower, parseInt(inviterId));
-        await updateUplineTeamSize(parseInt(inviterId));
+        // Update inviter's team size
+        const inviterWallet = (await db.ref(`userIdMap/${parsedInviterId}`).once('value')).val();
+        if(inviterWallet) {
+            await db.ref(`users/${inviterWallet}/teamSize`).transaction(size => (size || 0) + 1);
+        }
+
+        // [MODIFIED] Call the new commission distribution function
+        await distributeCommissions(parsedInviterId, parseFloat(registrationCost));
         
         res.status(201).json({ success: true, profile: fullUserRecord.profile });
 
@@ -181,59 +286,38 @@ app.post('/api/register', async (req, res) => {
 
 app.post('/api/upgrade', async (req, res) => {
     const { wallet, txHash, levelId, upgradeCost } = req.body;
-    const walletLower = wallet.toLowerCase();
 
-    // 1. Verify Transaction
-    const isValid = await verifyTransaction(txHash, walletLower, ADMIN_WALLET, upgradeCost);
+    if (!wallet || !txHash || !levelId || !upgradeCost) {
+        return res.status(400).json({ success: false, error: "Missing required fields for upgrade." });
+    }
+
+    const isValid = await verifyTransaction(txHash, wallet, ADMIN_WALLET, upgradeCost);
     if (!isValid) {
         return res.status(400).json({ success: false, error: "Payment verification for upgrade failed" });
     }
 
     try {
-        const userRef = db.ref(`users/${walletLower}`);
-        const userSnapshot = await userRef.once('value');
-        if (!userSnapshot.exists()) {
-            return res.status(404).json({ success: false, error: "User not found" });
-        }
-        const userData = userSnapshot.val();
-
-        // 2. Fetch Level Configuration from Firebase
-        const levelsConfigSnap = await db.ref('config/levels').once('value');
-        const levelsConfig = levelsConfigSnap.val();
-        const levelToUpgrade = levelsConfig ? levelsConfig.find(l => l.id === levelId) : null;
-
-        if (!levelToUpgrade) {
-            return res.status(400).json({ success: false, error: "Invalid level configuration." });
-        }
+        const walletLower = wallet.toLowerCase();
         
-        // 3. Update User's Level
-        await userRef.child('level').set(levelId);
-
-        // 4. Add Salary Fund to Global Pool
-        if (levelToUpgrade.salaryFund && levelToUpgrade.salaryFund > 0) {
-            await db.ref('salaryPool/currentWeek').transaction(currentPool => (currentPool || 0) + levelToUpgrade.salaryFund);
+        // [NEW] Add the `salaryFund` portion of the upgrade cost to the weekly pool
+        const levels = (await db.ref('config/levels').once('value')).val();
+        const levelConfig = levels.find(l => l.id === levelId);
+        if (levelConfig && levelConfig.salaryFund > 0) {
+            const baseZTRPrice = (await db.ref('config/baseZTRPrice').once('value')).val() || 1;
+            const salaryFundInZTR = levelConfig.salaryFund;
+            await db.ref('currentWeek/salaryPool').transaction(pool => (pool || 0) + salaryFundInZTR);
         }
 
-        // 5. Award Airdrop Points to User and Upliner
-        if (levelToUpgrade.airdropPoints && levelToUpgrade.airdropPoints > 0) {
-            // Award points to the user
-            await userRef.child('airdropPoints').transaction(points => (points || 0) + levelToUpgrade.airdropPoints);
+        // Update user level
+        await db.ref(`users/${walletLower}/level`).set(levelId);
 
-            // Award points to the upliner
-            const inviterId = userData.inviterId;
-            if (inviterId) {
-                const inviterWallet = (await db.ref(`userIdMap/${inviterId}`).once('value')).val();
-                if (inviterWallet) {
-                    await db.ref(`users/${inviterWallet}/airdropPoints`).transaction(points => (points || 0) + levelToUpgrade.airdropPoints);
-                }
-            }
-        }
-        
-        res.json({ success: true, message: "Upgrade successful and rewards distributed." });
+        // [NEW] Distribute airdrop points for the upgrade
+        await distributeAirdropPoints(walletLower, levelId);
 
+        res.json({ success: true, message: "Upgrade successful." });
     } catch (error) {
-        console.error(`Upgrade failed for wallet ${walletLower}:`, error);
-        res.status(500).json({ success: false, error: "An internal server error occurred during upgrade." });
+        console.error("Upgrade process failed:", error);
+        res.status(500).json({ success: false, error: "An internal server error occurred during the upgrade process." });
     }
 });
 
@@ -243,148 +327,111 @@ app.post('/api/withdraw', async (req, res) => {
     const userRef = db.ref(`users/${wallet.toLowerCase()}`);
     const snap = await userRef.once('value');
     const userData = snap.val();
+    
     if (!userData || userData.ztrBalance <= 0) {
         return res.status(400).json({ success: false, error: "No balance to withdraw or user not found." });
     }
-    const withdrawalRequest = { userWallet: wallet.toLowerCase(), amount: userData.ztrBalance, status: 'pending', date: new Date().toISOString() };
+    
+    const withdrawalRequest = { 
+        userWallet: wallet.toLowerCase(), 
+        amount: userData.ztrBalance, 
+        status: 'pending', 
+        date: new Date().toISOString() 
+    };
+
     await db.ref('withdrawals').push(withdrawalRequest);
     await userRef.child('ztrBalance').set(0);
-    res.json({ success: true });
+    
+    res.json({ success: true, message: "Withdrawal request submitted successfully." });
 });
 
+
 /**
- * ==========================================================================================
- * DYNAMIC WEEKLY SALARY DISTRIBUTION
- * ==========================================================================================
- * This function should be triggered once a week by a secure cron job or scheduled task.
- * It calculates and distributes salary based on performance.
- * ==========================================================================================
+ * [NEW] Admin endpoint to trigger weekly salary distribution.
+ * This should be protected in a real-world scenario (e.g., via a secret key or admin auth).
  */
-async function distributeWeeklySalary() {
-    console.log("Starting weekly salary distribution...");
-
-    const SALARY_ELIGIBILITY_LEVEL = 5; // e.g., Level 5 (Master) and above
-    const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
-    // 1. Get the total salary pool for the week
-    const salaryPoolRef = db.ref('salaryPool/currentWeek');
-    const salaryPoolSnap = await salaryPoolRef.once('value');
-    const totalSalaryFund = salaryPoolSnap.val() || 0;
-
-    if (totalSalaryFund <= 0) {
-        console.log("Salary fund is zero. No salaries to distribute.");
-        await salaryPoolRef.set(0); // Reset for next week
-        return;
-    }
-    
-    const distributableFund = totalSalaryFund * 0.90; // 90% is distributed
-    const reservedFund = totalSalaryFund * 0.10; // 10% is reserved
-
-    // 2. Find all eligible users and calculate their performance
-    const usersSnap = await db.ref('users').orderByChild('level').startAt(SALARY_ELIGIBILITY_LEVEL).once('value');
-    if (!usersSnap.exists()) {
-        console.log("No users are eligible for salary.");
-        // Roll over the entire fund to the next week
-        await db.ref('salaryPool/nextWeekFund').transaction(fund => (fund || 0) + totalSalaryFund);
-        await salaryPoolRef.set(0);
-        return;
+app.post('/api/admin/distribute-salary', async (req, res) => {
+    // Basic security check - replace 'YOUR_SECRET_KEY' with a real one in your environment variables
+    const { secret } = req.body;
+    if (secret !== process.env.ADMIN_SECRET_KEY) {
+        return res.status(403).json({ success: false, error: "Unauthorized." });
     }
 
-    const eligibleUsers = [];
-    let totalPerformanceScore = 0;
+    console.log("--- Starting Weekly Salary Distribution ---");
 
-    for (const wallet in usersSnap.val()) {
-        const user = usersSnap.val()[wallet];
-        if (!user.profile) continue;
+    try {
+        const salaryPoolRef = db.ref('currentWeek/salaryPool');
+        const salaryPoolSnap = await salaryPoolRef.once('value');
+        const totalSalaryPool = salaryPoolSnap.val() || 0;
 
-        let performanceScore = 0;
-        let directTeamCount = 0;
-        let indirectTeamCount = 0;
+        if (totalSalaryPool <= 0) {
+            return res.json({ success: true, message: "Salary pool is empty. No distribution needed." });
+        }
 
-        // Fetch direct referrals
-        const directRefsSnap = await db.ref('users').orderByChild('inviterId').equalTo(user.profile.userId).once('value');
-        
-        if (directRefsSnap.exists()) {
-            for (const directRefWallet in directRefsSnap.val()) {
-                const directRef = directRefsSnap.val()[directRefWallet];
-                // Check if they joined in the last week
-                if (directRef.profile.joinDate > oneWeekAgo) {
-                    directTeamCount++;
+        const distributablePool = totalSalaryPool * 0.90;
+        console.log(`Total Pool: ${totalSalaryPool} ZTR, Distributable (90%): ${distributablePool} ZTR`);
+
+        const usersSnapshot = await db.ref('users').orderByChild('level').startAt(5).once('value'); // Level 5+ are eligible
+        if (!usersSnapshot.exists()) {
+            return res.json({ success: true, message: "No eligible members for salary distribution." });
+        }
+
+        const eligibleUsers = [];
+        let totalPerformanceScore = 0;
+
+        // First pass: Calculate performance scores
+        for (const wallet in usersSnapshot.val()) {
+            const user = usersSnapshot.val()[wallet];
+            if (user.profile) { // Ensure user is fully registered
+                // Performance Score Logic: Based on the sum of direct team members' levels
+                let performanceScore = 0;
+                const directTeamSnapshot = await db.ref('users').orderByChild('inviterId').equalTo(user.profile.userId).once('value');
+                if (directTeamSnapshot.exists()) {
+                    directTeamSnapshot.forEach(memberSnap => {
+                        performanceScore += (memberSnap.val().level || 1);
+                    });
                 }
-                // Check their team growth (indirect)
-                const indirectTeamSize = directRef.teamSize || 0;
-                // A more advanced check would be to see which of those team members are new.
-                // For simplicity, we can use a proxy. A better way is to log new join events.
-                indirectTeamCount += indirectTeamSize; 
+                
+                // Add a base score for personal activity
+                performanceScore += (user.level || 1);
+
+                totalPerformanceScore += performanceScore;
+                eligibleUsers.push({ wallet, performanceScore, userId: user.profile.userId });
             }
         }
-        
-        // Performance Metric: (New Directs * 2) + Total Indirect Team Size
-        performanceScore = (directTeamCount * 2) + indirectTeamCount;
-        
-        if (performanceScore > 0) {
-            eligibleUsers.push({
-                wallet: wallet,
-                score: performanceScore
-            });
-            totalPerformanceScore += performanceScore;
-        }
-    }
 
-    if (totalPerformanceScore === 0) {
-        console.log("No performance recorded this week. Rolling over funds.");
-        await db.ref('salaryPool/nextWeekFund').transaction(fund => (fund || 0) + totalSalaryFund);
+        if (totalPerformanceScore === 0) {
+            // Reset the pool even if no one had performance to avoid locking funds
+            await salaryPoolRef.set(0);
+            return res.json({ success: true, message: "Eligible users found, but total performance score was zero. Pool has been reset." });
+        }
+
+        console.log(`Total Performance Score of all eligible users: ${totalPerformanceScore}`);
+
+        // Second pass: Distribute salary
+        for (const user of eligibleUsers) {
+            const userShare = (user.performanceScore / totalPerformanceScore) * distributablePool;
+            if (userShare > 0) {
+                const userRef = db.ref(`users/${user.wallet}`);
+                await userRef.child('ztrBalance').transaction(balance => (balance || 0) + userShare);
+                await userRef.child('salaryHistory').push({
+                    amount: userShare,
+                    date: new Date().toISOString(),
+                    performanceScore: user.performanceScore
+                });
+                console.log(`Distributed ${userShare.toFixed(4)} ZTR to User ID ${user.userId} (Wallet: ${user.wallet})`);
+            }
+        }
+
+        // Reset the weekly salary pool after distribution
         await salaryPoolRef.set(0);
-        return;
-    }
+        
+        console.log("--- Weekly Salary Distribution Complete ---");
+        res.json({ success: true, message: `Successfully distributed ${distributablePool.toFixed(2)} ZTR among ${eligibleUsers.length} members.` });
 
-    // 3. Distribute the salary
-    console.log(`Distributing ${distributableFund} ZTR among ${eligibleUsers.length} users based on a total score of ${totalPerformanceScore}.`);
-
-    const distributionPromises = eligibleUsers.map(user => {
-        const userShare = user.score / totalPerformanceScore;
-        const salaryAmount = distributableFund * userShare;
-
-        if (salaryAmount > 0) {
-            const userRef = db.ref(`users/${user.wallet}`);
-            // Add to ZTR balance
-            userRef.child('ztrBalance').transaction(balance => (balance || 0) + salaryAmount);
-            // Record in salary history
-            const historyRecord = {
-                amount: salaryAmount,
-                date: new Date().toISOString(),
-                score: user.score,
-                totalScore: totalPerformanceScore
-            };
-            return userRef.child('salaryHistory').push(historyRecord);
-        }
-        return Promise.resolve();
-    });
-
-    await Promise.all(distributionPromises);
-
-    // 4. Reset the pool for the next week
-    const nextWeekFund = (await db.ref('salaryPool/nextWeekFund').once('value')).val() || 0;
-    await salaryPoolRef.set(nextWeekFund + reservedFund); // Start next week with leftover + 10% reserve
-    await db.ref('salaryPool/nextWeekFund').set(0);
-
-    console.log("Weekly salary distribution finished successfully.");
-}
-
-// Example of how to trigger the salary distribution (for testing)
-// In production, this should be a secure, authenticated endpoint called by a cron job.
-app.post('/api/admin/trigger-salary', async (req, res) => {
-    // Add authentication here in a real app (e.g., check for an admin API key)
-    // const { apiKey } = req.body;
-    // if (apiKey !== process.env.ADMIN_API_KEY) {
-    //     return res.status(403).json({ success: false, error: "Unauthorized" });
-    // }
-    try {
-        await distributeWeeklySalary();
-        res.json({ success: true, message: "Salary distribution triggered successfully." });
     } catch (error) {
-        console.error("Manual Salary Trigger Failed:", error);
-        res.status(500).json({ success: false, error: "An internal server error occurred." });
+        console.error("Salary distribution failed:", error);
+        res.status(500).json({ success: false, error: "An internal server error occurred during salary distribution." });
     }
 });
 
