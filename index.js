@@ -8,29 +8,28 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Configuración del Administrador de Firebase desde Base64
+// Firebase Admin Setup from Base64
 try {
     const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
     if (!serviceAccountBase64) {
-        throw new Error("ERROR FATAL: La variable de entorno FIREBASE_SERVICE_ACCOUNT_BASE64 no está configurada.");
+        throw new Error("FATAL ERROR: FIREBASE_SERVICE_ACCOUNT_BASE64 environment variable is not set.");
     }
-    const serviceAccountBuffer = Buffer.from(serviceAccountBase64, 'base64');
-    const serviceAccount = JSON.parse(serviceAccountBuffer.toString('utf-8'));
+    const serviceAccount = JSON.parse(Buffer.from(serviceAccountBase64, 'base64').toString('ascii'));
 
     admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
         databaseURL: process.env.FIREBASE_DB_URL
     });
 } catch (error) {
-    console.error("Falló la inicialización del Administrador de Firebase:", error.message);
-    process.exit(1); // Detiene la aplicación si la configuración de Firebase es incorrecta
+    console.error("Firebase Admin Initialization Failed:", error.message);
+    process.exit(1); 
 }
+
 
 const db = admin.database();
 const ADMIN_WALLET = "0x97efeaa1da1108acff52840550ec51dc5bbfd812";
 const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955";
 
-// Proveedor de solo lectura para la verificación de transacciones
 const provider = new ethers.JsonRpcProvider("https://bsc-dataseed.binance.org/");
 
 const usdtAbi = [
@@ -40,68 +39,57 @@ const usdtAbi = [
 const usdtContract = new ethers.Contract(USDT_CONTRACT, usdtAbi, provider);
 
 /**
- * Valida un formato de dirección de billetera de Ethereum.
- * @param {string} address La dirección a validar.
- * @returns {boolean}
- */
-function isValidWalletAddress(address) {
-    return /^0x[a-fA-F0-9]{40}$/.test(address);
-}
-
-/**
- * Verifica una transacción USDT en la red BSC.
- * @param {string} txHash El hash de la transacción.
- * @param {string} fromWallet La billetera del remitente.
- * @param {string} toWallet La billetera del receptor.
- * @param {number|string} expectedAmount La cantidad mínima esperada en USDT.
- * @returns {Promise<boolean>}
+ * Verifies a USDT transaction on the BSC network.
  */
 async function verifyTransaction(txHash, fromWallet, toWallet, expectedAmount) {
     try {
         const receipt = await provider.getTransactionReceipt(txHash);
         if (!receipt || receipt.status !== 1) {
-            console.log(`Verificación fallida para ${txHash}: Recibo inválido o transacción fallida.`);
+            console.log(`Verification failed for ${txHash}: Invalid receipt or transaction failed.`);
             return false;
         }
         const decimals = await usdtContract.decimals();
-        const expectedAmountWei = ethers.parseUnits(expectedAmount.toString(), Number(decimals));
-
-        return receipt.logs.some(log => {
-            if (log.address.toLowerCase() !== USDT_CONTRACT.toLowerCase()) {
-                return false;
-            }
-            try {
-                const parsedLog = usdtContract.interface.parseLog(log);
-                if (parsedLog && parsedLog.name === "Transfer") {
-                    const { from, to, value } = parsedLog.args;
-                    return (
-                        from.toLowerCase() === fromWallet.toLowerCase() &&
-                        to.toLowerCase() === toWallet.toLowerCase() &&
-                        value >= expectedAmountWei
-                    );
+        // Use a small tolerance for floating point comparisons
+        const expectedAmountWei = ethers.parseUnits(parseFloat(expectedAmount).toFixed(decimals), decimals);
+        
+        for (const log of receipt.logs) {
+            if (log.address.toLowerCase() === USDT_CONTRACT.toLowerCase()) {
+                try {
+                    const parsedLog = usdtContract.interface.parseLog(log);
+                    if (parsedLog && parsedLog.name === "Transfer") {
+                        const { from, to, value } = parsedLog.args;
+                        if (
+                            from.toLowerCase() === fromWallet.toLowerCase() &&
+                            to.toLowerCase() === toWallet.toLowerCase() &&
+                            value >= expectedAmountWei
+                        ) {
+                            return true;
+                        }
+                    }
+                } catch(e) {
+                    // Ignore errors if a log isn't a Transfer event
                 }
-            } catch (e) {
-                // Ignora los logs que no son eventos de Transferencia
             }
-            return false;
-        });
+        }
+        return false;
     } catch (e) {
-        console.error(`Error al verificar la transacción ${txHash}:`, e);
+        console.error(`Error verifying transaction ${txHash}:`, e);
         return false;
     }
 }
 
-
 /**
- * Genera un código de invitación único de 8 caracteres.
- * @returns {Promise<string>}
+ * Generates a unique 8-character invite code.
  */
 async function generateInviteCode() {
     let code;
     let isUnique = false;
     const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     while (!isUnique) {
-        code = Array.from({ length: 8 }, () => characters.charAt(Math.floor(Math.random() * characters.length))).join('');
+        code = '';
+        for (let i = 0; i < 8; i++) {
+            code += characters.charAt(Math.floor(Math.random() * characters.length));
+        }
         const snapshot = await db.ref(`inviteCodeMap/${code}`).once('value');
         if (!snapshot.exists()) {
             isUnique = true;
@@ -110,46 +98,78 @@ async function generateInviteCode() {
     return code;
 }
 
+/**
+ * [NEW] Adds a "star" to a user's level matrix.
+ * @param {string} recipientWallet - The wallet address of the user receiving the star.
+ * @param {number} levelId - The ID of the level matrix to add the star to.
+ * @param {'direct' | 'upline' | 'downline'} starType - The type of star.
+ * @param {number} sourceUserId - The User ID of the person who generated this income/star.
+ */
+async function addStarToLevel(recipientWallet, levelId, starType, sourceUserId) {
+    if (!recipientWallet || !levelId || !starType || !sourceUserId) {
+        console.error("addStarToLevel: Missing required parameters.");
+        return;
+    }
+    try {
+        const starRef = db.ref(`users/${recipientWallet.toLowerCase()}/levelStars/level_${levelId}`);
+        const newStar = {
+            type: starType,
+            sourceUserId: sourceUserId
+        };
+        await starRef.push(newStar);
+        console.log(`Added a '${starType}' star to level ${levelId} for wallet ${recipientWallet} from user ${sourceUserId}`);
+    } catch (error) {
+        console.error(`Failed to add star for wallet ${recipientWallet}:`, error);
+    }
+}
+
 
 /**
- * Distribuye las comisiones de registro a la red.
- * @param {number} inviterId El ID de usuario del invitador.
- * @param {number} registrationCost El costo total del registro.
+ * [MODIFIED] Distributes commissions and STARS for new user registration.
  */
-async function distributeCommissions(inviterId, registrationCost) {
-    console.log(`Iniciando distribución de comisiones para el ID de invitador: ${inviterId}`);
+async function distributeCommissions(inviterId, registrationCost, newUserId) {
+    console.log(`Starting commission distribution for inviter ID: ${inviterId}`);
     
     const configSnapshot = await db.ref('config').once('value');
     const config = configSnapshot.val();
     
     if (!config || !Array.isArray(config.levels) || !config.levels[0] || typeof config.levels[0].price !== 'number') {
-        console.error("FATAL: El precio del Nivel 1 no está configurado correctamente en la base de datos. No se pueden distribuir las comisiones.");
+        console.error("FATAL: Level 1 price is not configured correctly in the database. Commissions cannot be distributed.");
         return;
     }
     const commissionableAmountInZTR = config.levels[0].price;
 
-    console.log(`Cantidad comisionable: ${commissionableAmountInZTR} ZTR`);
+    console.log(`Commissionable Amount: ${commissionableAmountInZTR} ZTR`);
 
-    const addCommission = async (userId, amount, type) => {
+    const addCommissionAndStar = async (userId, amount, type, starType, sourceUserId) => {
         if (!userId || isNaN(userId) || amount <= 0) return;
         const walletSnapshot = await db.ref(`userIdMap/${userId}`).once('value');
         if (!walletSnapshot.exists()) return;
         
         const wallet = walletSnapshot.val();
         const userRef = db.ref(`users/${wallet}`);
+        const userDataSnapshot = await userRef.once('value');
+        const userData = userDataSnapshot.val();
         
+        if (!userData) return;
+
+        // Add commission
         await userRef.child('ztrBalance').transaction(balance => (balance || 0) + amount);
         await userRef.child('incomeHistory').push({
-            amount: amount,
-            type: type,
-            date: new Date().toISOString()
+            amount: amount, type: type, date: new Date().toISOString()
         });
-        console.log(`Acreditado ${amount} ZTR al ID de Usuario ${userId} (${type})`);
+        
+        // Add Star
+        await addStarToLevel(wallet, 1, starType, sourceUserId); // Registration always affects Level 1
+
+        console.log(`Credited ${amount} ZTR to User ID ${userId} (${type})`);
     };
 
+    // 1. Direct Commission to Inviter (55%)
     const directCommission = commissionableAmountInZTR * 0.55;
-    await addCommission(inviterId, directCommission, 'Comisión Directa');
+    await addCommissionAndStar(inviterId, directCommission, 'Direct Commission', 'direct', newUserId);
 
+    // 2. Upline Commission (7%)
     const inviterWalletSnapshot = await db.ref(`userIdMap/${inviterId}`).once('value');
     if (inviterWalletSnapshot.exists()) {
         const inviterWallet = inviterWalletSnapshot.val();
@@ -157,28 +177,102 @@ async function distributeCommissions(inviterId, registrationCost) {
         if (inviterData && inviterData.inviterId) {
             const uplineId = inviterData.inviterId;
             const uplineCommission = commissionableAmountInZTR * 0.07;
-            await addCommission(uplineId, uplineCommission, 'Comisión de Upline');
+            await addCommissionAndStar(uplineId, uplineCommission, 'Upline Commission', 'upline', newUserId);
         }
     }
 
+    // 3. Team Commission (Spillover from Downline) (20%)
     const teamCommissionPool = commissionableAmountInZTR * 0.20;
     const teamMembersSnapshot = await db.ref('users').orderByChild('inviterId').equalTo(inviterId).once('value');
     
     if (teamMembersSnapshot.exists()) {
-        const teamWallets = [];
+        const team = [];
         teamMembersSnapshot.forEach(child => {
-            // Asegúrate de que solo los miembros existentes del equipo (no el nuevo usuario) reciban esto
-            if (child.val() && child.val().profile) {
-                 teamWallets.push(child.key);
+            // Exclude the new user themselves from this commission split
+            if (child.val() && child.val().profile && child.val().profile.userId !== newUserId) {
+                 team.push(child.key);
             }
         });
 
-        if (teamWallets.length > 0) {
-            const sharePerMember = teamCommissionPool / teamWallets.length;
-            for (const memberWallet of teamWallets) {
+        if (team.length > 0) {
+            const sharePerMember = teamCommissionPool / team.length;
+            for (const memberWallet of team) {
+                const memberData = (await db.ref(`users/${memberWallet}/profile/userId`).once('value')).val();
+                if(memberData) {
+                   await addCommissionAndStar(memberData, sharePerMember, 'Team Commission', 'downline', newUserId);
+                }
+            }
+        }
+    }
+}
+
+/**
+ * [NEW] Distributes commissions and STARS for a level upgrade.
+ */
+async function distributeUpgradeCommissions(upgradingUserWallet, levelId, levelPrice) {
+    const upgradingUserRef = db.ref(`users/${upgradingUserWallet.toLowerCase()}`);
+    const upgradingUserSnap = await upgradingUserRef.once('value');
+    const upgradingUserData = upgradingUserSnap.val();
+
+    if (!upgradingUserData || !upgradingUserData.inviterId || !upgradingUserData.profile) {
+        console.log(`Upgrade commission distribution skipped: User ${upgradingUserWallet} has no inviter.`);
+        return;
+    }
+    
+    const upgradingUserId = upgradingUserData.profile.userId;
+    const inviterId = upgradingUserData.inviterId;
+    const commissionableAmountInZTR = levelPrice;
+
+    console.log(`Starting upgrade commission distribution for level ${levelId}. Amount: ${commissionableAmountInZTR} ZTR`);
+
+    const addCommissionAndStar = async (userId, amount, type, starType) => {
+        if (!userId || isNaN(userId) || amount <= 0) return;
+        const walletSnapshot = await db.ref(`userIdMap/${userId}`).once('value');
+        if (!walletSnapshot.exists()) return;
+        
+        const wallet = walletSnapshot.val();
+        const userRef = db.ref(`users/${wallet}`);
+
+        await userRef.child('ztrBalance').transaction(balance => (balance || 0) + amount);
+        await userRef.child('incomeHistory').push({ amount, type, date: new Date().toISOString() });
+        
+        // Add Star to the corresponding level matrix
+        await addStarToLevel(wallet, levelId, starType, upgradingUserId);
+
+        console.log(`Credited ${amount} ZTR to User ID ${userId} (${type}) for level ${levelId} upgrade.`);
+    };
+
+    // 1. Direct Commission (55%)
+    await addCommissionAndStar(inviterId, commissionableAmountInZTR * 0.55, 'Direct Upgrade Commission', 'direct');
+
+    // 2. Upline Commission (7%)
+    const inviterWallet = (await db.ref(`userIdMap/${inviterId}`).once('value')).val();
+    if(inviterWallet) {
+        const inviterData = (await db.ref(`users/${inviterWallet}`).once('value')).val();
+        if (inviterData && inviterData.inviterId) {
+            const uplineId = inviterData.inviterId;
+            await addCommissionAndStar(uplineId, commissionableAmountInZTR * 0.07, 'Upline Upgrade Commission', 'upline');
+        }
+    }
+    
+    // 3. Team Commission (20%)
+    const teamCommissionPool = commissionableAmountInZTR * 0.20;
+    const teamMembersSnapshot = await db.ref('users').orderByChild('inviterId').equalTo(inviterId).once('value');
+    
+    if (teamMembersSnapshot.exists()) {
+        const team = [];
+        teamMembersSnapshot.forEach(child => {
+            if (child.val() && child.val().profile && child.key.toLowerCase() !== upgradingUserWallet.toLowerCase()) {
+                 team.push(child.key);
+            }
+        });
+
+        if (team.length > 0) {
+            const sharePerMember = teamCommissionPool / team.length;
+            for (const memberWallet of team) {
                 const memberUserId = (await db.ref(`users/${memberWallet}/profile/userId`).once('value')).val();
-                if (memberUserId) {
-                   await addCommission(memberUserId, sharePerMember, 'Comisión de Equipo');
+                if(memberUserId) {
+                   await addCommissionAndStar(memberUserId, sharePerMember, 'Team Upgrade Commission', 'downline');
                 }
             }
         }
@@ -187,30 +281,28 @@ async function distributeCommissions(inviterId, registrationCost) {
 
 
 /**
- * Distribuye puntos de airdrop por una mejora de nivel.
- * @param {string} userWallet Billetera del usuario que mejora.
- * @param {number} levelId ID del nivel al que se mejora.
+ * Distributes airdrop points for a level upgrade.
  */
 async function distributeAirdropPoints(userWallet, levelId) {
-    console.log(`Distribuyendo puntos de airdrop para la billetera ${userWallet} que mejora al nivel ${levelId}`);
+    console.log(`Distributing airdrop points for wallet ${userWallet} upgrading to level ${levelId}`);
 
     const levels = (await db.ref('config/levels').once('value')).val();
     if (!Array.isArray(levels)) {
-        console.log("No se pudieron distribuir los puntos de airdrop: 'config/levels' no es un array.");
+        console.log("Airdrop points could not be distributed: 'config/levels' is not an array.");
         return;
     }
     const levelConfig = levels.find(l => l.id === levelId);
 
     if (!levelConfig || typeof levelConfig.airdropPoints !== 'number' || levelConfig.airdropPoints <= 0) {
-        console.log(`No hay puntos de airdrop configurados para el nivel ${levelId}.`);
+        console.log(`No airdrop points configured for level ${levelId}.`);
         return;
     }
 
     const points = levelConfig.airdropPoints;
-    const userWalletLower = userWallet.toLowerCase();
-    const userRef = db.ref(`users/${userWalletLower}`);
+
+    const userRef = db.ref(`users/${userWallet}`);
     await userRef.child('airdropPoints').transaction(currentPoints => (currentPoints || 0) + points);
-    console.log(`Otorgados ${points} puntos de airdrop a ${userWalletLower}`);
+    console.log(`Awarded ${points} airdrop points to ${userWallet}`);
 
     const userData = (await userRef.once('value')).val();
     if (userData && userData.inviterId) {
@@ -218,24 +310,24 @@ async function distributeAirdropPoints(userWallet, levelId) {
         if (inviterWallet) {
             const inviterRef = db.ref(`users/${inviterWallet}`);
             await inviterRef.child('airdropPoints').transaction(currentPoints => (currentPoints || 0) + points);
-            console.log(`Otorgados ${points} puntos de airdrop al invitador ${inviterWallet}`);
+            console.log(`Awarded ${points} airdrop points to inviter ${inviterWallet}`);
         }
     }
 }
 
-// --- ENDPOINTS DE LA API ---
+// --- API ENDPOINTS ---
 
 app.post('/api/register', async (req, res) => {
     const { wallet, txHash, inviterId, username, profilePic, registrationCost } = req.body;
     
-    if (!wallet || !txHash || !inviterId || !username || !registrationCost || !isValidWalletAddress(wallet)) {
-        return res.status(400).json({ success: false, error: "Faltan campos requeridos o la billetera es inválida." });
+    if (!wallet || !txHash || !inviterId || !username || !registrationCost) {
+        return res.status(400).json({ success: false, error: "Missing required fields." });
     }
 
     try {
         const isValid = await verifyTransaction(txHash, wallet, ADMIN_WALLET, registrationCost); 
         if (!isValid) {
-            return res.status(400).json({ success: false, error: "La verificación de la transacción falló." });
+            return res.status(400).json({ success: false, error: "Transaction verification failed." });
         }
 
         const walletLower = wallet.toLowerCase();
@@ -243,13 +335,13 @@ app.post('/api/register', async (req, res) => {
         
         const snapshot = await userRef.once('value');
         if (snapshot.exists() && snapshot.val().profile) {
-            return res.status(400).json({ success: false, error: "El usuario ya está registrado." });
+            return res.status(400).json({ success: false, error: "User is already registered." });
         }
         
         const nextIdRef = db.ref('nextUserId');
         const idResult = await nextIdRef.transaction(currentId => (currentId || 1000) + 1);
         if (!idResult.committed) {
-             throw new Error("No se pudo generar un nuevo ID de usuario.");
+             throw new Error("Could not generate new user ID.");
         }
         const userId = idResult.snapshot.val();
         
@@ -263,7 +355,8 @@ app.post('/api/register', async (req, res) => {
                 profilePicUrl: profilePic || null, avatar: 'fa-user-astronaut'
             },
             inviteCode, inviterId: parsedInviterId, paid: true,
-            ztrBalance: 0, airdropPoints: 100, level: 1, teamSize: 0
+            ztrBalance: 0, airdropPoints: 100, level: 1, teamSize: 0,
+            levelStars: {} // Initialize levelStars object
         };
 
         await userRef.set(fullUserRecord); 
@@ -275,79 +368,65 @@ app.post('/api/register', async (req, res) => {
             await db.ref(`users/${inviterWallet}/teamSize`).transaction(size => (size || 0) + 1);
         }
 
-        await distributeCommissions(parsedInviterId, parseFloat(registrationCost));
+        // MODIFIED: Pass new user's ID for star tracking
+        await distributeCommissions(parsedInviterId, parseFloat(registrationCost), userId);
         
-        // Aumentar el recuento total de usuarios para las estadísticas
-        await db.ref('platformStats/totalParticipants').transaction(count => (count || 0) + 1);
-
         res.status(201).json({ success: true, profile: fullUserRecord.profile });
 
     } catch (error) {
-        console.error("Registro fallido:", error);
-        res.status(500).json({ success: false, error: "Ocurrió un error interno en el servidor." });
+        console.error("Registration failed:", error);
+        res.status(500).json({ success: false, error: "An internal server error occurred." });
     }
 });
 
 
 app.post('/api/upgrade', async (req, res) => {
-    const { wallet, txHash, levelId, upgradeCost } = req.body;
+    // MODIFIED: Added levelPrice to request body for commission calculation
+    const { wallet, txHash, levelId, upgradeCost, levelPrice } = req.body;
 
-    if (!wallet || !txHash || !levelId || !upgradeCost || !isValidWalletAddress(wallet)) {
-        return res.status(400).json({ success: false, error: "Faltan campos requeridos para la mejora o la billetera es inválida." });
+    if (!wallet || !txHash || !levelId || !upgradeCost || levelPrice === undefined) {
+        return res.status(400).json({ success: false, error: "Missing required fields for upgrade (wallet, txHash, levelId, upgradeCost, levelPrice)." });
     }
 
     try {
         const isValid = await verifyTransaction(txHash, wallet, ADMIN_WALLET, upgradeCost);
         if (!isValid) {
-            return res.status(400).json({ success: false, error: "La verificación del pago para la mejora falló" });
+            return res.status(400).json({ success: false, error: "Payment verification for upgrade failed" });
         }
 
         const walletLower = wallet.toLowerCase();
-        const userRef = db.ref(`users/${walletLower}`);
-
-        // Verificar que el usuario exista y esté mejorando al siguiente nivel
-        const userSnap = await userRef.child('level').once('value');
-        if (!userSnap.exists() || userSnap.val() !== levelId - 1) {
-            return res.status(400).json({ success: false, error: "Mejora de nivel no válida." });
-        }
         
         const levels = (await db.ref('config/levels').once('value')).val();
         if (Array.isArray(levels)) {
             const levelConfig = levels.find(l => l.id === levelId);
             if (levelConfig && typeof levelConfig.salaryFund === 'number' && levelConfig.salaryFund > 0) {
-                // Agregar al fondo de salarios y al total distribuido
                 await db.ref('currentWeek/salaryPool').transaction(pool => (pool || 0) + levelConfig.salaryFund);
-                await db.ref('platformStats/totalZTRDistributed').transaction(total => (total || 0) + levelConfig.price);
-            }
-            if (levelConfig.id >= 5) {
-                await db.ref('platformStats/salaryActiveMembers').transaction(count => (count || 0) + 1);
             }
         }
 
-        await userRef.child('level').set(levelId);
+        await db.ref(`users/${walletLower}/level`).set(levelId);
         await distributeAirdropPoints(walletLower, levelId);
 
-        res.json({ success: true, message: "Mejora exitosa." });
+        // [NEW] Distribute commissions and stars for this upgrade
+        await distributeUpgradeCommissions(walletLower, levelId, levelPrice);
+
+        res.json({ success: true, message: "Upgrade successful." });
     } catch (error) {
-        console.error("El proceso de mejora falló:", error);
-        res.status(500).json({ success: false, error: "Ocurrió un error interno en el servidor durante la mejora." });
+        console.error("Upgrade process failed:", error);
+        res.status(500).json({ success: false, error: "An internal server error occurred during upgrade." });
     }
 });
 
 
 app.post('/api/withdraw', async (req, res) => {
     const { wallet } = req.body;
-    if (!wallet || !isValidWalletAddress(wallet)) {
-        return res.status(400).json({ success: false, error: "Dirección de billetera no válida." });
-    }
-
     try {
         const userRef = db.ref(`users/${wallet.toLowerCase()}`);
         const snap = await userRef.once('value');
         const userData = snap.val();
         
         if (!userData || !userData.ztrBalance || userData.ztrBalance <= 0) {
-            return res.status(400).json({ success: false, error: "No hay saldo para retirar." });
+            return res.status(400).json({ success: false, error: "No balance to withdraw." });
         }
         
         const withdrawalRequest = { 
@@ -358,10 +437,10 @@ app.post('/api/withdraw', async (req, res) => {
         await db.ref('withdrawals').push(withdrawalRequest);
         await userRef.child('ztrBalance').set(0);
         
-        res.json({ success: true, message: "Solicitud de retiro enviada." });
+        res.json({ success: true, message: "Withdrawal request submitted." });
     } catch (error) {
-        console.error("La solicitud de retiro falló:", error);
-        res.status(500).json({ success: false, error: "Ocurrió un error interno en el servidor." });
+        console.error("Withdrawal request failed:", error);
+        res.status(500).json({ success: false, error: "An internal server error occurred." });
     }
 });
 
@@ -369,44 +448,42 @@ app.post('/api/withdraw', async (req, res) => {
 app.post('/api/admin/distribute-salary', async (req, res) => {
     const { secret } = req.body;
     if (secret !== process.env.ADMIN_SECRET_KEY) {
-        return res.status(403).json({ success: false, error: "No autorizado." });
+        return res.status(403).json({ success: false, error: "Unauthorized." });
     }
 
-    console.log("--- Iniciando la Distribución Semanal de Salarios ---");
+    console.log("--- Starting Weekly Salary Distribution ---");
     try {
         const salaryPoolRef = db.ref('currentWeek/salaryPool');
         const salaryPoolSnap = await salaryPoolRef.once('value');
         const totalSalaryPool = salaryPoolSnap.val() || 0;
 
         if (totalSalaryPool <= 0) {
-            console.log("El fondo de salarios está vacío. No se distribuye nada.");
-            return res.json({ success: true, message: "El fondo de salarios está vacío." });
+            console.log("Salary distribution skipped: Pool is empty.");
+            await salaryPoolRef.set(0); // Ensure pool is reset
+            return res.json({ success: true, message: "Salary pool is empty." });
         }
 
         const distributablePool = totalSalaryPool * 0.90;
-        console.log(`Fondo Total: ${totalSalaryPool} ZTR, Distribuible: ${distributablePool} ZTR`);
+        console.log(`Total Pool: ${totalSalaryPool} ZTR, Distributable: ${distributablePool} ZTR`);
 
         const usersSnapshot = await db.ref('users').orderByChild('level').startAt(5).once('value');
         if (!usersSnapshot.exists()) {
-            await salaryPoolRef.set(0); // Limpiar el fondo aunque nadie sea elegible
-            console.log("No se encontraron miembros elegibles para el salario.");
-            return res.json({ success: true, message: "No se encontraron miembros elegibles." });
+            await salaryPoolRef.set(0); 
+            return res.json({ success: true, message: "No eligible members found." });
         }
 
         const eligibleUsers = [];
         let totalPerformanceScore = 0;
-        
-        const usersData = usersSnapshot.val();
-        const userWallets = Object.keys(usersData);
+        const allUsersData = usersSnapshot.val();
 
-        await Promise.all(userWallets.map(async (wallet) => {
-            const user = usersData[wallet];
-            if (user && user.profile) {
-                let performanceScore = user.level || 0; // Puntuación base
+        await Promise.all(Object.keys(allUsersData).map(async (wallet) => {
+            const user = allUsersData[wallet];
+            if (user && user.profile && user.level >= 5) {
+                let performanceScore = user.level || 1; 
                 const directTeamSnapshot = await db.ref('users').orderByChild('inviterId').equalTo(user.profile.userId).once('value');
                 if (directTeamSnapshot.exists()) {
                     directTeamSnapshot.forEach(memberSnap => {
-                        performanceScore += (memberSnap.val().level || 0);
+                        performanceScore += (memberSnap.val().level || 1);
                     });
                 }
                 
@@ -417,11 +494,10 @@ app.post('/api/admin/distribute-salary', async (req, res) => {
 
         if (totalPerformanceScore <= 0) {
             await salaryPoolRef.set(0);
-            console.log("No se encontró actividad de rendimiento entre los usuarios elegibles.");
-            return res.json({ success: true, message: "No se encontró actividad de rendimiento entre los usuarios elegibles." });
+            return res.json({ success: true, message: "No performance activity found among eligible users." });
         }
 
-        console.log(`Puntuación Total de Rendimiento: ${totalPerformanceScore}`);
+        console.log(`Total Performance Score: ${totalPerformanceScore}`);
         
         await Promise.all(eligibleUsers.map(async (user) => {
             const userShare = (user.performanceScore / totalPerformanceScore) * distributablePool;
@@ -433,22 +509,22 @@ app.post('/api/admin/distribute-salary', async (req, res) => {
                     date: new Date().toISOString(),
                     performanceScore: user.performanceScore
                 });
-                console.log(`Distribuido ${userShare.toFixed(4)} ZTR al ID de Usuario ${user.userId}`);
+                console.log(`Distributed ${userShare.toFixed(4)} ZTR to User ID ${user.userId}`);
             }
         }));
         
-        await db.ref('platformStats/totalWeeklySalaryFund').set(totalSalaryPool);
-        await salaryPoolRef.set(0); // Restablecer el fondo
+        await salaryPoolRef.set(0); 
         
-        console.log("--- Distribución Semanal de Salarios Completa ---");
-        res.json({ success: true, message: `Salario distribuido exitosamente.` });
+        console.log("--- Weekly Salary Distribution Complete ---");
+        res.json({ success: true, message: `Successfully distributed salary.` });
 
-    } catch (error) {
-        console.error("La distribución de salarios falló:", error);
-        res.status(500).json({ success: false, error: "Ocurrió un error interno en el servidor." });
+    } catch (error)
+        {
+        console.error("Salary distribution failed:", error);
+        res.status(500).json({ success: false, error: "An internal server error occurred." });
     }
 });
 
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor corriendo en el puerto ${PORT}`));```
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
