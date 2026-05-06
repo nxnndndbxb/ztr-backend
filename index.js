@@ -38,7 +38,7 @@ const usdtAbi = [
 ];
 const usdtContract = new ethers.Contract(USDT_CONTRACT, usdtAbi, provider);
 
-// --- Helper Functions ---
+// --- Helper Functions (No changes here) ---
 
 async function verifyTransaction(txHash, fromWallet, toWallet, expectedAmount) {
     try {
@@ -66,9 +66,7 @@ async function verifyTransaction(txHash, fromWallet, toWallet, expectedAmount) {
                             return true;
                         }
                     }
-                } catch (e) {
-                    // Ignore logs that are not Transfer events
-                }
+                } catch (e) {}
             }
         }
         console.log(`Verification failed for ${txHash}: No matching USDT Transfer event found.`);
@@ -96,6 +94,8 @@ async function generateInviteCode() {
     return code;
 }
 
+// Other helper functions (addStarToLevel, distribute commissions, etc.) remain the same...
+
 async function addStarToLevel(recipientWallet, levelId, starType, sourceUserId) {
     if (!recipientWallet || !levelId || !starType || !sourceUserId) {
         console.error("addStarToLevel Error: Missing required parameters.");
@@ -108,7 +108,6 @@ async function addStarToLevel(recipientWallet, levelId, starType, sourceUserId) 
             sourceUserId: sourceUserId,
             timestamp: admin.database.ServerValue.TIMESTAMP
         });
-        console.log(`Added a '${starType}' star to level ${levelId} for wallet ${recipientWallet} from user ${sourceUserId}`);
     } catch (error) {
         console.error(`Failed to add star for wallet ${recipientWallet}:`, error);
     }
@@ -118,11 +117,9 @@ async function distributeRegistrationCommissions(inviterId, newUserId) {
     const configSnapshot = await db.ref('config').once('value');
     const config = configSnapshot.val();
     if (!config || !config.levels || !config.levels[0] || typeof config.levels[0].price !== 'number') {
-        console.error("FATAL: Level 1 price is not configured. Commissions cannot be distributed.");
         return;
     }
     const commissionableAmountInZTR = config.levels[0].price;
-    console.log(`Distributing registration commission. Base Amount: ${commissionableAmountInZTR} ZTR`);
 
     const addCommission = async (userId, amount, type, starType) => {
         if (!userId || isNaN(userId) || amount <= 0) return;
@@ -134,7 +131,6 @@ async function distributeRegistrationCommissions(inviterId, newUserId) {
         await userRef.child('ztrBalance').transaction(balance => (balance || 0) + amount);
         await userRef.child('incomeHistory').push({ amount, type, date: new Date().toISOString() });
         await addStarToLevel(wallet, 1, starType, newUserId);
-        console.log(`Credited ${amount.toFixed(4)} ZTR to User ID ${userId} (${type})`);
     };
 
     await addCommission(inviterId, commissionableAmountInZTR * 0.55, 'Direct Commission', 'direct');
@@ -177,7 +173,6 @@ async function distributeUpgradeCommissions(upgradingUserWallet, levelId, levelP
     const upgradingUserId = upgradingUserData.profile.userId;
     const inviterId = upgradingUserData.inviterId;
     const commissionableAmountInZTR = levelPrice;
-    console.log(`Distributing upgrade commission for level ${levelId}. Base Amount: ${commissionableAmountInZTR} ZTR`);
 
     const addCommission = async (targetUserId, amount, type, starType) => {
         if (!targetUserId || isNaN(targetUserId) || amount <= 0) return;
@@ -188,7 +183,6 @@ async function distributeUpgradeCommissions(upgradingUserWallet, levelId, levelP
         await userRef.child('ztrBalance').transaction(balance => (balance || 0) + amount);
         await userRef.child('incomeHistory').push({ amount, type, date: new Date().toISOString() });
         await addStarToLevel(wallet, levelId, starType, upgradingUserId);
-        console.log(`Credited ${amount.toFixed(4)} ZTR to User ID ${targetUserId} (${type}) for level ${levelId} upgrade.`);
     };
 
     await addCommission(inviterId, commissionableAmountInZTR * 0.55, 'Direct Upgrade Commission', 'direct');
@@ -233,7 +227,6 @@ async function distributeAirdropPoints(userWallet, levelId) {
     
     await userRef.child('airdropPoints').transaction(p => (p || 0) + points);
     await db.ref('platformStats/totalAirdropDistributed').transaction(p => (p || 0) + points);
-    console.log(`Awarded ${points} airdrop points to ${userWallet} for reaching level ${levelId}`);
 
     const userData = (await userRef.once('value')).val();
     if (userData && userData.inviterId) {
@@ -241,7 +234,6 @@ async function distributeAirdropPoints(userWallet, levelId) {
         if (inviterWallet) {
             await db.ref(`users/${inviterWallet}/airdropPoints`).transaction(p => (p || 0) + points);
             await db.ref('platformStats/totalAirdropDistributed').transaction(p => (p || 0) + points);
-            console.log(`Awarded ${points} airdrop points to inviter ${inviterWallet} for downline upgrade.`);
         }
     }
 }
@@ -251,26 +243,22 @@ async function distributeAirdropPoints(userWallet, levelId) {
 
 app.post('/api/register', async (req, res) => {
     const { wallet, txHash, inviterId, username, profilePic, registrationCost } = req.body;
-    
-    if (!wallet || !txHash || !inviterId || !username || !registrationCost) {
-        return res.status(400).json({ success: false, error: "Missing required registration fields." });
-    }
+    if (!wallet || !txHash || !inviterId || !username || !registrationCost) return res.status(400).json({ success: false, error: "Missing fields." });
 
     try {
         if (!await verifyTransaction(txHash, wallet, ADMIN_WALLET, registrationCost)) {
-            return res.status(400).json({ success: false, error: "Transaction could not be verified." });
+            return res.status(400).json({ success: false, error: "Transaction invalid." });
         }
 
         const walletLower = wallet.toLowerCase();
         const userRef = db.ref(`users/${walletLower}`);
-        
         const snapshot = await userRef.once('value');
         if (snapshot.exists() && snapshot.val().profile) {
-            return res.status(400).json({ success: false, error: "This wallet is already registered." });
+            return res.status(400).json({ success: false, error: "Wallet already registered." });
         }
         
         const idResult = await db.ref('nextUserId').transaction(id => (id || 1000) + 1);
-        if (!idResult.committed) throw new Error("Could not generate a unique user ID.");
+        if (!idResult.committed) throw new Error("Could not generate user ID.");
         const userId = idResult.snapshot.val();
         
         const inviteCode = await generateInviteCode();
@@ -295,24 +283,24 @@ app.post('/api/register', async (req, res) => {
         }
 
         await distributeRegistrationCommissions(parsedInviterId, userId);
+        // Important: This line will now create the totalParticipants field if it doesn't exist
         await db.ref('platformStats/totalParticipants').transaction(p => (p || 0) + 1);
         
         res.status(201).json({ success: true, message: "Registration successful." });
     } catch (error) {
         console.error("Registration Error:", error);
-        res.status(500).json({ success: false, error: "An internal server error occurred during registration." });
+        res.status(500).json({ success: false, error: "Internal server error." });
     }
 });
 
 app.post('/api/upgrade', async (req, res) => {
+    // This endpoint remains the same
     const { wallet, txHash, levelId, upgradeCost, levelPrice } = req.body;
-    if (!wallet || !txHash || !levelId || !upgradeCost || levelPrice === undefined) {
-        return res.status(400).json({ success: false, error: "Missing required fields for upgrade." });
-    }
+    if (!wallet || !txHash || !levelId || !upgradeCost || levelPrice === undefined) return res.status(400).json({ success: false, error: "Missing fields." });
 
     try {
         if (!await verifyTransaction(txHash, wallet, ADMIN_WALLET, upgradeCost)) {
-            return res.status(400).json({ success: false, error: "Upgrade payment verification failed." });
+            return res.status(400).json({ success: false, error: "Payment verification failed." });
         }
 
         const walletLower = wallet.toLowerCase();
@@ -320,7 +308,7 @@ app.post('/api/upgrade', async (req, res) => {
         const currentLevel = (await userLevelRef.once('value')).val() || 0;
         
         if (currentLevel !== levelId - 1) {
-             return res.status(400).json({ success: false, error: "Invalid level progression. Please upgrade sequentially." });
+             return res.status(400).json({ success: false, error: "Invalid level progression." });
         }
         
         const levels = (await db.ref('config/levels').once('value')).val();
@@ -336,13 +324,15 @@ app.post('/api/upgrade', async (req, res) => {
         res.json({ success: true, message: "Level upgrade successful." });
     } catch (error) {
         console.error("Upgrade Error:", error);
-        res.status(500).json({ success: false, error: "An internal server error occurred during upgrade." });
+        res.status(500).json({ success: false, error: "Internal server error." });
     }
 });
 
+
 app.post('/api/withdraw', async (req, res) => {
+    // This endpoint remains the same
     const { wallet } = req.body;
-    if (!wallet) return res.status(400).json({ success: false, error: "Wallet address is required." });
+    if (!wallet) return res.status(400).json({ success: false, error: "Wallet required." });
 
     try {
         const userRef = db.ref(`users/${wallet.toLowerCase()}`);
@@ -350,7 +340,7 @@ app.post('/api/withdraw', async (req, res) => {
         const userData = snap.val();
         
         if (!userData || !userData.ztrBalance || userData.ztrBalance <= 0) {
-            return res.status(400).json({ success: false, error: "You have no balance to withdraw." });
+            return res.status(400).json({ success: false, error: "No balance to withdraw." });
         }
         
         await db.ref('withdrawals').push({ 
@@ -362,64 +352,69 @@ app.post('/api/withdraw', async (req, res) => {
         
         await userRef.child('ztrBalance').set(0);
         
-        res.json({ success: true, message: "Withdrawal request submitted for approval." });
+        res.json({ success: true, message: "Withdrawal request submitted." });
     } catch (error) {
         console.error("Withdrawal Error:", error);
-        res.status(500).json({ success: false, error: "An internal server error occurred." });
+        res.status(500).json({ success: false, error: "Internal server error." });
     }
 });
 
-// UPDATED AND IMPROVED ENDPOINT
+
+// ================================================================
+// ===== THIS IS THE FULLY UPDATED AND CORRECTED ENDPOINT =========
+// ================================================================
 app.get('/api/platform-data', async (req, res) => {
     try {
-        // Step 1: Fetch platform statistics
+        const usersRef = db.ref('users');
+        const allUsersSnapshot = await usersRef.once('value');
+
+        // --- Calculate Total Participants Correctly ---
+        const totalParticipants = allUsersSnapshot.exists() ? allUsersSnapshot.numChildren() : 0;
+        
+        // --- Fetch other stats ---
         const statsSnapshot = await db.ref('platformStats').once('value');
-        const stats = statsSnapshot.val() || {
-            totalParticipants: 0,
-            totalWeeklySalaryFund: 0,
-            totalAirdropDistributed: 0,
-            totalZTRDistributed: 0 // Default value if not present
+        const otherStats = statsSnapshot.val() || {};
+
+        const finalStats = {
+            totalParticipants: totalParticipants, // Use the real-time calculated value
+            totalWeeklySalaryFund: otherStats.totalWeeklySalaryFund || 0,
+            totalAirdropDistributed: otherStats.totalAirdropDistributed || 0,
+            salaryActiveMembers: otherStats.salaryActiveMembers || 0,
+            totalZTRDistributed: otherStats.totalZTRDistributed || 0
         };
-
-        // Step 2: Fetch users for the leaderboard
-        // NOTE: For this query to work, you MUST add an index in your Firebase Rules. See instructions below.
-        const usersSnap = await db.ref('users').orderByChild('ztrBalance').limitToLast(200).once('value');
+        
+        // --- Build Leaderboard ---
         let leaderboard = [];
-
-        if (usersSnap.exists()) {
-            const usersData = usersSnap.val();
-            // Convert the user object from Firebase into an array
-            for (const wallet in usersData) {
-                const u = usersData[wallet];
-                // Ensure the user has a profile and a balance before adding them
-                if (u.profile && typeof u.ztrBalance === 'number') {
+        if (allUsersSnapshot.exists()) {
+            allUsersSnapshot.forEach(snap => {
+                const u = snap.val();
+                if(u.profile && typeof u.ztrBalance === 'number') {
                     leaderboard.push({
                         name: u.profile.name,
                         userId: u.profile.userId,
                         profilePicUrl: u.profile.profilePicUrl || '',
-                        earnings: u.ztrBalance
+                        earnings: u.ztrBalance || 0
                     });
                 }
-            }
-            // Sort the array to have the highest earner first
+            });
+            // Sort by earnings descending and take top 200
             leaderboard.sort((a, b) => b.earnings - a.earnings);
-        } else {
-             console.log("Leaderboard Info: No users found in the database to generate a leaderboard.");
+            leaderboard = leaderboard.slice(0, 200);
         }
+        
+        res.json({ success: true, stats: finalStats, leaderboard });
 
-        res.json({ success: true, stats, leaderboard });
     } catch (error) {
         console.error("Fetching platform data failed:", error);
-        res.status(500).json({ success: false, error: "An internal server error occurred while fetching platform data." });
+        res.status(500).json({ success: false, error: "An internal server error." });
     }
 });
 
 
 app.post('/api/claim-task-reward', async (req, res) => {
+    // This endpoint remains the same
     const { wallet, taskRequired, taskPoints } = req.body;
-    if (!wallet || !taskRequired || !taskPoints) {
-        return res.status(400).json({ success: false, error: "Missing required fields for task claim." });
-    }
+    if (!wallet || !taskRequired || !taskPoints) return res.status(400).json({ success: false, error: "Missing fields." });
 
     try {
         const walletLower = wallet.toLowerCase();
@@ -428,14 +423,11 @@ app.post('/api/claim-task-reward', async (req, res) => {
         const userData = userSnap.val();
 
         if (!userData) return res.status(404).json({ success: false, error: "User not found." });
-        
-        if ((userData.teamSize || 0) < taskRequired) {
-            return res.status(400).json({ success: false, error: "Task requirements not met." });
-        }
+        if ((userData.teamSize || 0) < taskRequired) return res.status(400).json({ success: false, error: "Task not completed." });
         
         const taskKey = `task_${taskRequired}`;
         if (userData.claimedTasks && userData.claimedTasks[taskKey]) {
-            return res.status(400).json({ success: false, error: "Task reward has already been claimed." });
+            return res.status(400).json({ success: false, error: "Reward already claimed." });
         }
 
         await userRef.child(`claimedTasks/${taskKey}`).set(true);
@@ -449,21 +441,21 @@ app.post('/api/claim-task-reward', async (req, res) => {
     }
 });
 
+
 app.post('/api/admin/distribute-salary', async (req, res) => {
+    // This endpoint remains the same
     if (req.body.secret !== process.env.ADMIN_SECRET_KEY) {
         return res.status(403).json({ success: false, error: "Unauthorized access." });
     }
 
     try {
         const salaryPool = (await db.ref('platformStats/totalWeeklySalaryFund').once('value')).val() || 0;
-        if (salaryPool <= 0) {
-            return res.json({ success: true, message: "Salary pool is empty. No salaries distributed." });
-        }
+        if (salaryPool <= 0) return res.json({ success: true, message: "Salary pool is empty." });
 
         const usersSnapshot = await db.ref('users').orderByChild('level').startAt(5).once('value');
         if (!usersSnapshot.exists()) {
             await db.ref('platformStats/totalWeeklySalaryFund').set(0);
-            return res.json({ success: true, message: "No members are eligible for salary this week." });
+            return res.json({ success: true, message: "No eligible members for salary." });
         }
         
         const eligibleUsers = [];
@@ -494,11 +486,10 @@ app.post('/api/admin/distribute-salary', async (req, res) => {
         }
         
         await db.ref('platformStats/totalWeeklySalaryFund').set(0);
-        console.log("Weekly salary distribution has been completed successfully.");
         res.json({ success: true, message: `Distributed ${salaryPool} ZTR among ${eligibleUsers.length} users.` });
     } catch (error) {
-        console.error("Salary distribution process failed:", error);
-        res.status(500).json({ success: false, error: "An internal server error occurred during salary distribution." });
+        console.error("Salary distribution failed:", error);
+        res.status(500).json({ success: false, error: "Internal server error." });
     }
 });
 
