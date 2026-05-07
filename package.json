@@ -1,15 +1,23 @@
 {
   "name": "ztr-backend-new",
-  "version": "2.0.0",
+  "version": "2.1.0",
+  "description": "ZTR Platform Backend API",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "ethers": "^6.7.0",
+    "ethers": "^6.13.4",
     "express": "^4.18.2",
-    "firebase-admin": "^11.10.1"
+    "firebase-admin": "^11.11.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }
