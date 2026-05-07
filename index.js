@@ -14,19 +14,28 @@ app.use(express.json()); // JSON format mein data receive karne ke liye
 // NOTE: Vercel environment variables mein FIREBASE_SERVICE_ACCOUNT_BASE64 aur FIREBASE_DB_URL set karna lazmi hai.
 try {
     const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
+    const databaseURL = process.env.FIREBASE_DB_URL;
+
     if (!serviceAccountBase64) {
-        throw new Error("FATAL ERROR: FIREBASE_SERVICE_ACCOUNT_BASE64 environment variable is not set.");
+        throw new Error("FATAL ERROR: FIREBASE_SERVICE_ACCOUNT_BASE64 environment variable is not set. Please check Vercel dashboard.");
     }
+    if (!databaseURL) {
+        throw new Error("FATAL ERROR: FIREBASE_DB_URL environment variable is not set. Please check Vercel dashboard.");
+    }
+
     const serviceAccount = JSON.parse(Buffer.from(serviceAccountBase64, 'base64').toString('ascii'));
 
     admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
-        databaseURL: process.env.FIREBASE_DB_URL
+        databaseURL: databaseURL
     });
     console.log("Firebase Admin Initialized Successfully.");
 } catch (error) {
-    console.error("Firebase Admin Initialization Failed:", error.message);
-    process.exit(1); // Agar Firebase connect na ho to server band ho jayega
+    // CHANGE: Behtar error logging, server ko crash karne ke bajaye. Vercel logs mein error saaf nazar aayega.
+    console.error("!!! FIREBASE ADMIN INITIALIZATION FAILED !!!");
+    console.error("Error Message:", error.message);
+    console.error("This is a critical error. The server cannot function without a database connection.");
+    console.error("Please ensure FIREBASE_SERVICE_ACCOUNT_BASE64 and FIREBASE_DB_URL are correctly set in your Vercel Environment Variables and redeploy.");
 }
 
 const db = admin.database();
@@ -44,24 +53,11 @@ const usdtContract = new ethers.Contract(USDT_CONTRACT, usdtAbi, provider);
 
 // --- Helper Functions (Madadgar Functions) ---
 
-/**
- * User input ko saaf karta hai taake security issues na hon.
- * @param {string} input - Saaf karne wala text.
- * @returns {string} - Saaf shuda text.
- */
 function sanitizeInput(input) {
     if (!input) return '';
     return input.replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/**
- * Binance Smart Chain par USDT transaction ko verify karta hai.
- * @param {string} txHash - Transaction ka hash.
- * @param {string} fromWallet - Bhejne wale ka address.
- * @param {string} toWallet - Receive karne wale ka address.
- * @param {string|number} expectedAmount - Kitni amount expect ki ja rahi hai.
- * @returns {Promise<boolean>} - Agar transaction sahi hai to 'true', warna 'false'.
- */
 async function verifyTransaction(txHash, fromWallet, toWallet, expectedAmount) {
     try {
         const receipt = await provider.getTransactionReceipt(txHash);
@@ -71,7 +67,7 @@ async function verifyTransaction(txHash, fromWallet, toWallet, expectedAmount) {
         }
         const decimals = await usdtContract.decimals();
         const expectedAmountWei = ethers.parseUnits(parseFloat(expectedAmount).toFixed(Number(decimals)), decimals);
-        const tolerance = ethers.parseUnits("0.01", decimals); // Thori si chhoot
+        const tolerance = ethers.parseUnits("0.01", decimals);
 
         for (const log of receipt.logs) {
             if (log.address.toLowerCase() === USDT_CONTRACT.toLowerCase()) {
@@ -99,10 +95,6 @@ async function verifyTransaction(txHash, fromWallet, toWallet, expectedAmount) {
     }
 }
 
-/**
- * Ek unique 8-digit ka invite code banata hai.
- * @returns {Promise<string>} Unique invite code.
- */
 async function generateInviteCode() {
     let code;
     let isUnique = false;
@@ -120,13 +112,6 @@ async function generateInviteCode() {
     return code;
 }
 
-/**
- * User ke level matrix mein ek 'star' add karta hai.
- * @param {string} recipientWallet - Star receive karne wale ka wallet.
- * @param {number} levelId - Kis level mein star add karna hai.
- * @param {'direct' | 'upline' | 'downline'} starType - Star ki type.
- * @param {number} sourceUserId - Kis user ki wajah se yeh star mila.
- */
 async function addStarToLevel(recipientWallet, levelId, starType, sourceUserId) {
     if (!recipientWallet || !levelId || !starType || !sourceUserId) return;
     try {
@@ -140,8 +125,6 @@ async function addStarToLevel(recipientWallet, levelId, starType, sourceUserId) 
     }
 }
 
-// ... Baqi sab helper functions (distributeRegistrationCommissions, distributeUpgradeCommissions, distributeAirdropPoints) bilkul aese hi rahenge jaise pichle jawab mein diye gaye the. Unmein koi change nahi hai ...
-// For brevity, I am not repeating them, but you should have them here. I will just add them below.
 
 async function distributeRegistrationCommissions(inviterId, newUserId) {
     const config = (await db.ref('config').once('value')).val();
@@ -230,7 +213,6 @@ async function distributeAirdropPoints(userWallet, levelId) {
 
 // --- API ROUTES (API Endpoints) ---
 
-// YEH NAYA ROUTE HAI JO VERCEL LOGS MEIN 404 ERROR KO FIX KAREGA
 app.get('/', (req, res) => {
     res.status(200).json({ 
         success: true, 
@@ -238,8 +220,6 @@ app.get('/', (req, res) => {
     });
 });
 
-
-// Registration Endpoint
 app.post('/api/register', async (req, res) => {
     const { wallet, txHash, inviterId, username, profilePic, registrationCost } = req.body;
     if (!wallet || !txHash || !inviterId || !username || !registrationCost) {
@@ -279,7 +259,6 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// Level Upgrade Endpoint
 app.post('/api/upgrade', async (req, res) => {
     const { wallet, txHash, levelId, upgradeCost, levelPrice } = req.body;
     if (!wallet || !txHash || !levelId || upgradeCost === undefined || levelPrice === undefined) {
@@ -307,7 +286,6 @@ app.post('/api/upgrade', async (req, res) => {
     }
 });
 
-// Withdrawal Endpoint
 app.post('/api/withdraw', async (req, res) => {
     const { wallet } = req.body;
     if (!wallet) return res.status(400).json({ success: false, error: "Wallet address required." });
@@ -326,7 +304,6 @@ app.post('/api/withdraw', async (req, res) => {
     }
 });
 
-// Platform Data Endpoint
 app.get('/api/platform-data', async (req, res) => {
     try {
         const stats = (await db.ref('platformStats').once('value')).val() || {};
@@ -339,7 +316,8 @@ app.get('/api/platform-data', async (req, res) => {
                     leaderboard.push({ name: u.profile.name, userId: u.profile.userId, profilePicUrl: u.profile.profilePicUrl || '', earnings: u.ztrBalance || 0 });
                 }
             });
-            leaderboard.sort((a, b) => b.earnings - a.earnings).slice(0, 200);
+            // CHANGE: Leaderboard bug fix. .slice() returns a new array, so we must re-assign it.
+            leaderboard = leaderboard.sort((a, b) => b.earnings - a.earnings).slice(0, 200);
         }
         res.json({ success: true, stats, leaderboard });
     } catch (error) {
@@ -348,7 +326,6 @@ app.get('/api/platform-data', async (req, res) => {
     }
 });
 
-// Task Claiming Endpoint
 app.post('/api/claim-task-reward', async (req, res) => {
     const { wallet, taskRequired, taskPoints } = req.body;
     if (!wallet || !taskRequired || !taskPoints) {
@@ -375,7 +352,6 @@ app.post('/api/claim-task-reward', async (req, res) => {
     }
 });
 
-// Salary Distribution Endpoint (Admin Only)
 app.post('/api/admin/distribute-salary', async (req, res) => {
     if (req.body.secret !== process.env.ADMIN_SECRET_KEY) {
         return res.status(403).json({ success: false, error: "Unauthorized." });
