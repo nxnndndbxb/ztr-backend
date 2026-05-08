@@ -657,8 +657,11 @@ app.get('/api/platform-data', async (req, res) => {
         // Initialize missing stats
         if (!stats.totalZTRDistributed) stats.totalZTRDistributed = 0;
         if (!stats.totalAirdropDistributed) stats.totalAirdropDistributed = 0;
-        if (!stats.totalParticipants) stats.totalParticipants = 0;
         if (!stats.totalWeeklySalaryFund) stats.totalWeeklySalaryFund = 0;
+        
+        // Calculate total participants by counting users directly for accuracy.
+        const allUsersSnapshot = await db.ref('users').once('value');
+        stats.totalParticipants = allUsersSnapshot.exists() ? allUsersSnapshot.numChildren() : 0;
         
         // Calculate salary active members (level 5 or higher)
         const salaryActiveSnapshot = await db.ref('users').orderByChild('level').startAt(5).once('value');
@@ -855,7 +858,9 @@ app.get('/api/user/:wallet', async (req, res) => {
                 teamSize: userData.teamSize || 0,
                 inviterId: userData.inviterId,
                 inviteCode: userData.inviteCode,
-                joinDate: userData.profile?.joinDate
+                joinDate: userData.profile?.joinDate,
+                incomeHistory: userData.incomeHistory || {},
+                salaryHistory: userData.salaryHistory || {}
             }
         });
         
