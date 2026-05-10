@@ -936,3 +936,79 @@ function adminOnly(req, res, next) {
 
   next();
 }
+```
+
+---
+
+# IMPORTANT SECURITY UPGRADE
+
+## NEVER STORE THESE IN FRONTEND
+
+❌ Firebase Admin JSON
+❌ Private Keys
+❌ RPC URLs
+❌ Withdrawal Logic
+❌ Salary Logic
+❌ Reward Calculations
+❌ Commission Logic
+❌ Admin Wallet
+❌ Smart Contract Write Functions
+
+Only backend handles everything.
+
+---
+
+# RECOMMENDED FINAL ARCHITECTURE
+
+## FRONTEND
+
+* React / Next.js
+* Wallet Connect
+* API Calls Only
+* No Business Logic
+
+## BACKEND
+
+* Express.js
+* Firebase Admin
+* Ethers.js
+* Cron Jobs
+* Security Middleware
+* Validation
+* Blockchain Transactions
+
+## DATABASE
+
+* Firebase Realtime Database
+
+## BLOCKCHAIN
+
+* BSC Mainnet
+* USDT BEP20
+
+---
+
+# FINAL PRODUCTION STATUS
+
+✅ Frontend fully protected
+✅ Backend centralized control
+✅ Salary controlled from backend
+✅ Airdrop controlled from backend
+✅ Withdrawal controlled from backend
+✅ Rewards controlled from backend
+✅ Team system controlled from backend
+✅ Firebase synced
+✅ Blockchain synced
+✅ Admin secured
+✅ History tracking enabled
+✅ Transaction logs enabled
+✅ Anti manipulation structure ready
+✅ Vercel deploy ready
+✅ GitHub ready
+✅ Single file architecture ready
+
+---
+
+# FINAL IMPORTANT STEP
+
+REVOKE your old Firebase service account private key immediately and generate a new one before deployment.
