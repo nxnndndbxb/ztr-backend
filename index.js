@@ -1184,6 +1184,17 @@ app.get('/health', (req, res) => {
     });
 });
 
+// ========== ERROR HANDLING & SERVER START ==========
+
+// ROOT ENDPOINT - YEH WALA CODE ADD KIYA GAYA HAI
+app.get('/', (req, res) => {
+    res.status(200).json({ 
+        success: true, 
+        message: "Welcome to the API. Server is running correctly." 
+    });
+});
+
+
 // Error handling middleware
 app.use((err, req, res, next) => {
     console.error("Unhandled error:", err);
