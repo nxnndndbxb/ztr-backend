@@ -1,1014 +1,523 @@
-# Single File Backend (Node.js + Express + Firebase + BSC USDT)
+# Single File Backend (Full Frontend Controller)
 
-## IMPORTANT SECURITY WARNING
+```js
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const admin = require('firebase-admin');
+const { v4: uuidv4 } = require('uuid');
 
-You shared your Firebase service account private key publicly in chat. That key is now compromised.
-
-Immediately do this before deploying:
-
-1. Open Firebase Console
-2. Project Settings → Service Accounts
-3. Delete/Revoke current private key
-4. Generate NEW private key
-5. Use NEW key in `.env`
-
-Never expose service account JSON publicly.
-
----
-
-# Backend Features Included
-
-✅ Firebase Admin Realtime Database
-✅ User Registration
-✅ Referral System
-✅ Invite Code System
-✅ Team History
-✅ Income History
-✅ Withdrawal Requests
-✅ Withdrawal Approval/Rejection
-✅ Transaction History
-✅ Admin Wallet Config
-✅ Auto Bot Logs
-✅ Platform Stats
-✅ Connected Wallet Tracking
-✅ Full API Backend
-✅ Vercel Compatible
-✅ Single File Backend
-✅ History Records
-✅ Validation
-✅ Error Handling
-✅ Clean Structure
-
----
-
-# FILE NAME
-
-`server.js`
-
----
-
-# INSTALL PACKAGES
-
-```bash
-npm init -y
-npm install express firebase-admin cors dotenv ethers body-parser
-```
-
----
-
-# ENV FILE (.env)
-
-```env
-PORT=5000
-
-BSC_RPC=https://bsc-dataseed.binance.org/
-
-ADMIN_WALLET=0x97efeaa1da1108acff52840550ec51dc5bbfd812
-
-USDT_CONTRACT=0x55d398326f99059fF775485246999027B3197955
-
-PRIVATE_KEY=YOUR_ADMIN_PRIVATE_KEY
-```
-
----
-
-# FULL BACKEND CODE
-
-```javascript
-const express = require("express");
-const cors = require("cors");
-const bodyParser = require("body-parser");
-const admin = require("firebase-admin");
-const { ethers } = require("ethers");
-require("dotenv").config();
-
-const app = express();
-
-app.use(cors());
-app.use(bodyParser.json());
-
-// ================= FIREBASE =================
-
-const serviceAccount = require("./firebase-service-account.json");
+const serviceAccount = require('./firebase-service-account.json');
 
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://fortune-2cb70-default-rtdb.firebaseio.com"
+    credential: admin.credential.cert(serviceAccount),
+    databaseURL: process.env.FIREBASE_DB_URL
 });
 
 const db = admin.database();
 
-// ================= BLOCKCHAIN =================
+const app = express();
 
-const provider = new ethers.JsonRpcProvider(process.env.BSC_RPC);
+app.use(cors());
+app.use(express.json());
 
-const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || 'ZTR_SECRET';
 
-const USDT_ABI = [
-  "function transfer(address to, uint amount) returns (bool)",
-  "function balanceOf(address owner) view returns (uint)",
-  "function decimals() view returns (uint8)"
-];
+// ================= AUTH MIDDLEWARE =================
 
-const usdt = new ethers.Contract(
-  process.env.USDT_CONTRACT,
-  USDT_ABI,
-  wallet
-);
+const auth = async (req, res, next) => {
 
-// ================= HELPERS =================
+    try {
 
-function generateInviteCode() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  let result = "";
+        const token = req.headers.authorization?.split(' ')[1];
 
-  for (let i = 0; i < 8; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
+        if (!token) {
+            return res.status(401).json({
+                success: false,
+                message: 'No Token'
+            });
+        }
 
-  return result;
-}
+        const decoded = jwt.verify(token, JWT_SECRET);
 
-async function getNextUserId() {
-  const snap = await db.ref("nextUserId").once("value");
-  let id = snap.val() || 1000;
+        req.user = decoded;
 
-  await db.ref("nextUserId").set(id + 1);
+        next();
 
-  return id;
-}
+    } catch (err) {
 
-async function addIncome(walletAddress, amount, type) {
-  const ref = db.ref(`users/${walletAddress}/incomeHistory`).push();
+        return res.status(401).json({
+            success: false,
+            message: 'Invalid Token'
+        });
+    }
+};
 
-  await ref.set({
-    amount,
-    type,
-    timestamp: Date.now(),
-    date: new Date().toISOString()
-  });
-}
+// ================= HOME =================
 
-async function updateBalance(walletAddress, amount) {
-  const ref = db.ref(`users/${walletAddress}/ztrBalance`);
+app.get('/', (req, res) => {
 
-  const snap = await ref.once("value");
-
-  const current = snap.val() || 0;
-
-  await ref.set(current + amount);
-}
-
-async function updateTeamSize(walletAddress) {
-  const ref = db.ref(`users/${walletAddress}/teamSize`);
-
-  const snap = await ref.once("value");
-
-  const current = snap.val() || 0;
-
-  await ref.set(current + 1);
-}
-
-// ================= HEALTH =================
-
-app.get("/", (req, res) => {
-  res.json({
-    success: true,
-    message: "Backend Running Successfully"
-  });
+    res.json({
+        success: true,
+        message: 'Backend Running Successfully'
+    });
 });
 
 // ================= REGISTER =================
 
-app.post("/register", async (req, res) => {
-  try {
-    const { walletAddress, name, inviterCode } = req.body;
+app.post('/api/register', async (req, res) => {
 
-    if (!walletAddress || !name) {
-      return res.status(400).json({
-        success: false,
-        message: "Missing fields"
-      });
+    try {
+
+        const {
+            name,
+            email,
+            password,
+            wallet,
+            inviterId
+        } = req.body;
+
+        if (!name || !email || !password) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing Fields'
+            });
+        }
+
+        const existing = await db
+            .ref('users')
+            .orderByChild('email')
+            .equalTo(email)
+            .once('value');
+
+        if (existing.exists()) {
+            return res.status(400).json({
+                success: false,
+                message: 'Email Already Exists'
+            });
+        }
+
+        const hashed = await bcrypt.hash(password, 10);
+
+        const userId = uuidv4();
+
+        const userData = {
+            userId,
+            name,
+            email,
+            password: hashed,
+            wallet: wallet || '',
+            inviterId: inviterId || null,
+            balance: 0,
+            totalIncome: 0,
+            level: 0,
+            directTeam: 0,
+            totalTeam: 0,
+            createdAt: Date.now()
+        };
+
+        await db.ref(`users/${userId}`).set(userData);
+
+        if (inviterId) {
+
+            const inviterRef = db.ref(`users/${inviterId}`);
+            const inviterSnap = await inviterRef.once('value');
+
+            if (inviterSnap.exists()) {
+
+                const inviter = inviterSnap.val();
+
+                await inviterRef.update({
+                    directTeam: (inviter.directTeam || 0) + 1
+                });
+            }
+        }
+
+        return res.json({
+            success: true,
+            message: 'Registration Successful'
+        });
+
+    } catch (err) {
+
+        return res.status(500).json({
+            success: false,
+            message: err.message
+        });
     }
-
-    const lowerWallet = walletAddress.toLowerCase();
-
-    const existing = await db.ref(`users/${lowerWallet}`).once("value");
-
-    if (existing.exists()) {
-      return res.json({
-        success: false,
-        message: "User already exists"
-      });
-    }
-
-    const userId = await getNextUserId();
-
-    const inviteCode = generateInviteCode();
-
-    let inviterId = null;
-
-    if (inviterCode) {
-      const inviterSnap = await db
-        .ref(`inviteCodeMap/${inviterCode}`)
-        .once("value");
-
-      if (inviterSnap.exists()) {
-        const inviterWallet = inviterSnap.val();
-
-        const inviterData = await db
-          .ref(`users/${inviterWallet}`)
-          .once("value");
-
-        inviterId = inviterData.val()?.profile?.userId || null;
-
-        await updateBalance(inviterWallet, 0.04);
-
-        await addIncome(inviterWallet, 0.04, "Direct Commission");
-
-        await updateTeamSize(inviterWallet);
-      }
-    }
-
-    const userData = {
-      paid: true,
-      level: 0,
-      teamSize: 0,
-      ztrBalance: 0,
-      inviteCode,
-      inviterId,
-      profile: {
-        name,
-        userId,
-        joinDate: new Date().toLocaleDateString()
-      }
-    };
-
-    await db.ref(`users/${lowerWallet}`).set(userData);
-
-    await db.ref(`inviteCodeMap/${inviteCode}`).set(lowerWallet);
-
-    await db.ref(`userIdMap/${userId}`).set(lowerWallet);
-
-    res.json({
-      success: true,
-      message: "Registration successful",
-      user: userData
-    });
-  } catch (error) {
-    console.log(error);
-
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
 });
 
 // ================= LOGIN =================
 
-app.post("/login", async (req, res) => {
-  try {
-    const { walletAddress } = req.body;
+app.post('/api/login', async (req, res) => {
 
-    const snap = await db
-      .ref(`users/${walletAddress.toLowerCase()}`)
-      .once("value");
+    try {
 
-    if (!snap.exists()) {
-      return res.json({
-        success: false,
-        message: "User not found"
-      });
+        const { email, password } = req.body;
+
+        const snapshot = await db
+            .ref('users')
+            .orderByChild('email')
+            .equalTo(email)
+            .once('value');
+
+        if (!snapshot.exists()) {
+            return res.status(404).json({
+                success: false,
+                message: 'User Not Found'
+            });
+        }
+
+        let user;
+
+        snapshot.forEach(doc => {
+            user = doc.val();
+        });
+
+        const match = await bcrypt.compare(password, user.password);
+
+        if (!match) {
+            return res.status(400).json({
+                success: false,
+                message: 'Wrong Password'
+            });
+        }
+
+        const token = jwt.sign({
+            userId: user.userId,
+            email: user.email
+        }, JWT_SECRET, {
+            expiresIn: '7d'
+        });
+
+        return res.json({
+            success: true,
+            token,
+            user
+        });
+
+    } catch (err) {
+
+        return res.status(500).json({
+            success: false,
+            message: err.message
+        });
     }
-
-    await db.ref(`users/${walletAddress.toLowerCase()}/lastLogin`).set(
-      new Date().toISOString()
-    );
-
-    res.json({
-      success: true,
-      user: snap.val()
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
 });
 
-// ================= USER =================
+// ================= PROFILE =================
 
-app.get("/user/:wallet", async (req, res) => {
-  try {
-    const wallet = req.params.wallet.toLowerCase();
+app.get('/api/profile', auth, async (req, res) => {
 
-    const snap = await db.ref(`users/${wallet}`).once("value");
+    try {
 
-    res.json({
-      success: true,
-      data: snap.val() || null
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
+        const snapshot = await db
+            .ref(`users/${req.user.userId}`)
+            .once('value');
 
-// ================= ALL USERS =================
+        return res.json({
+            success: true,
+            data: snapshot.val()
+        });
 
-app.get("/users", async (req, res) => {
-  try {
-    const snap = await db.ref("users").once("value");
+    } catch (err) {
 
-    res.json({
-      success: true,
-      data: snap.val() || {}
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// ================= CONNECT WALLET =================
-
-app.post("/connect-wallet", async (req, res) => {
-  try {
-    const { wallet, network, usdtBalance } = req.body;
-
-    await db.ref(`connected_users/${wallet.toLowerCase()}`).set({
-      wallet,
-      network,
-      usdtBalance,
-      lastConnected: new Date().toISOString()
-    });
-
-    res.json({
-      success: true,
-      message: "Wallet connected"
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// ================= WITHDRAW REQUEST =================
-
-app.post("/withdraw", async (req, res) => {
-  try {
-    const { walletAddress, amount } = req.body;
-
-    if (!walletAddress || !amount) {
-      return res.json({
-        success: false,
-        message: "Missing fields"
-      });
+        return res.status(500).json({
+            success: false,
+            message: err.message
+        });
     }
+});
 
-    const wallet = walletAddress.toLowerCase();
+// ================= DEPOSIT =================
 
-    const userSnap = await db.ref(`users/${wallet}`).once("value");
+app.post('/api/deposit', auth, async (req, res) => {
 
-    if (!userSnap.exists()) {
-      return res.json({
-        success: false,
-        message: "User not found"
-      });
+    try {
+
+        const { amount } = req.body;
+
+        const userRef = db.ref(`users/${req.user.userId}`);
+
+        const snapshot = await userRef.once('value');
+
+        const user = snapshot.val();
+
+        const newBalance = Number(user.balance || 0) + Number(amount);
+
+        await userRef.update({
+            balance: newBalance
+        });
+
+        await db.ref(`transactions/${req.user.userId}`).push({
+            type: 'Deposit',
+            amount,
+            status: 'Success',
+            time: Date.now()
+        });
+
+        return res.json({
+            success: true,
+            balance: newBalance
+        });
+
+    } catch (err) {
+
+        return res.status(500).json({
+            success: false,
+            message: err.message
+        });
     }
+});
 
-    const user = userSnap.val();
+// ================= WITHDRAW =================
 
-    if ((user.ztrBalance || 0) < amount) {
-      return res.json({
-        success: false,
-        message: "Insufficient balance"
-      });
+app.post('/api/withdraw', auth, async (req, res) => {
+
+    try {
+
+        const { amount } = req.body;
+
+        const userRef = db.ref(`users/${req.user.userId}`);
+
+        const snapshot = await userRef.once('value');
+
+        const user = snapshot.val();
+
+        if (Number(user.balance) < Number(amount)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Insufficient Balance'
+            });
+        }
+
+        const newBalance = Number(user.balance) - Number(amount);
+
+        await userRef.update({
+            balance: newBalance
+        });
+
+        await db.ref(`transactions/${req.user.userId}`).push({
+            type: 'Withdraw',
+            amount,
+            status: 'Success',
+            time: Date.now()
+        });
+
+        return res.json({
+            success: true,
+            balance: newBalance
+        });
+
+    } catch (err) {
+
+        return res.status(500).json({
+            success: false,
+            message: err.message
+        });
     }
+});
 
-    const withdrawalRef = db.ref("withdrawals").push();
+// ================= BUY LEVEL =================
 
-    await withdrawalRef.set({
-      amount,
-      status: "processing",
-      requestDate: new Date().toISOString(),
-      userId: user.profile.userId,
-      userWallet: wallet
-    });
+app.post('/api/buy-level', auth, async (req, res) => {
 
-    // ================= BOT ANALYSIS =================
+    try {
 
-    if (amount > 5) {
-      await withdrawalRef.update({
-        status: "rejected",
-        botRejectReason: `Amount $${amount} exceeds limit`,
-        rejectedAt: Date.now()
-      });
+        const { level, amount } = req.body;
 
-      await db.ref("botLogs").push({
-        amount,
-        decision: "REJECT",
-        reason: "Exceeds $5 limit",
-        timestamp: Date.now(),
-        userId: user.profile.userId
-      });
+        const userRef = db.ref(`users/${req.user.userId}`);
 
-      return res.json({
-        success: false,
-        message: "Withdrawal rejected by bot"
-      });
+        const snapshot = await userRef.once('value');
+
+        const user = snapshot.val();
+
+        if (Number(user.balance) < Number(amount)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Low Balance'
+            });
+        }
+
+        const newBalance = Number(user.balance) - Number(amount);
+
+        await userRef.update({
+            balance: newBalance,
+            level
+        });
+
+        await db.ref(`incomeHistory/${req.user.userId}`).push({
+            type: 'Level Purchase',
+            level,
+            amount,
+            time: Date.now()
+        });
+
+        return res.json({
+            success: true,
+            message: 'Level Activated'
+        });
+
+    } catch (err) {
+
+        return res.status(500).json({
+            success: false,
+            message: err.message
+        });
     }
-
-    // ================= SEND USDT =================
-
-    const decimals = await usdt.decimals();
-
-    const tx = await usdt.transfer(
-      wallet,
-      ethers.parseUnits(amount.toString(), decimals)
-    );
-
-    await tx.wait();
-
-    await withdrawalRef.update({
-      status: "approved",
-      txHash: tx.hash,
-      processedAt: Date.now()
-    });
-
-    await db.ref("transactions").push({
-      amount,
-      status: "completed",
-      to: wallet,
-      txHash: tx.hash,
-      createdAt: Date.now(),
-      withdrawalId: withdrawalRef.key
-    });
-
-    await db.ref(`users/${wallet}/ztrBalance`).set(
-      (user.ztrBalance || 0) - amount
-    );
-
-    await db.ref("botLogs").push({
-      amount,
-      decision: "APPROVE",
-      reason: "Amount ≤ $5",
-      timestamp: Date.now(),
-      userId: user.profile.userId
-    });
-
-    res.json({
-      success: true,
-      message: "Withdrawal completed",
-      txHash: tx.hash
-    });
-  } catch (error) {
-    console.log(error);
-
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
 });
 
-// ================= WITHDRAW HISTORY =================
+// ================= TRANSACTION HISTORY =================
 
-app.get("/withdrawals", async (req, res) => {
-  try {
-    const snap = await db.ref("withdrawals").once("value");
+app.get('/api/transactions', auth, async (req, res) => {
 
-    res.json({
-      success: true,
-      data: snap.val() || {}
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
+    try {
+
+        const snapshot = await db
+            .ref(`transactions/${req.user.userId}`)
+            .once('value');
+
+        return res.json({
+            success: true,
+            data: snapshot.val() || {}
+        });
+
+    } catch (err) {
+
+        return res.status(500).json({
+            success: false,
+            message: err.message
+        });
+    }
 });
 
-// ================= TRANSACTIONS =================
+// ================= INCOME HISTORY =================
 
-app.get("/transactions", async (req, res) => {
-  try {
-    const snap = await db.ref("transactions").once("value");
+app.get('/api/income-history', auth, async (req, res) => {
 
-    res.json({
-      success: true,
-      data: snap.val() || {}
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
+    try {
+
+        const snapshot = await db
+            .ref(`incomeHistory/${req.user.userId}`)
+            .once('value');
+
+        return res.json({
+            success: true,
+            data: snapshot.val() || {}
+        });
+
+    } catch (err) {
+
+        return res.status(500).json({
+            success: false,
+            message: err.message
+        });
+    }
 });
 
-// ================= BOT LOGS =================
+// ================= TEAM HISTORY =================
 
-app.get("/bot-logs", async (req, res) => {
-  try {
-    const snap = await db.ref("botLogs").once("value");
+app.get('/api/team', auth, async (req, res) => {
 
-    res.json({
-      success: true,
-      data: snap.val() || {}
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
+    try {
+
+        const snapshot = await db
+            .ref('users')
+            .orderByChild('inviterId')
+            .equalTo(req.user.userId)
+            .once('value');
+
+        return res.json({
+            success: true,
+            data: snapshot.val() || {}
+        });
+
+    } catch (err) {
+
+        return res.status(500).json({
+            success: false,
+            message: err.message
+        });
+    }
 });
 
-// ================= PLATFORM STATS =================
+// ================= ADMIN DASHBOARD =================
 
-app.get("/platform-stats", async (req, res) => {
-  try {
-    const snap = await db.ref("platformStats").once("value");
+app.get('/api/admin/dashboard', async (req, res) => {
 
-    res.json({
-      success: true,
-      data: snap.val() || {}
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
+    try {
 
-// ================= ADMIN CONFIG =================
+        const snapshot = await db.ref('users').once('value');
 
-app.get("/admin-config", async (req, res) => {
-  try {
-    const snap = await db.ref("admin_config").once("value");
+        const users = snapshot.val() || {};
 
-    res.json({
-      success: true,
-      data: snap.val() || {}
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
+        let totalUsers = 0;
+        let totalIncome = 0;
 
-// ================= UPDATE ADMIN WALLET =================
+        Object.values(users).forEach(user => {
+            totalUsers++;
+            totalIncome += Number(user.totalIncome || 0);
+        });
 
-app.post("/update-admin-wallet", async (req, res) => {
-  try {
-    const { wallet } = req.body;
+        return res.json({
+            success: true,
+            totalUsers,
+            totalIncome
+        });
 
-    await db.ref("admin_config").set({
-      adminWallet: wallet,
-      updated: Date.now()
-    });
+    } catch (err) {
 
-    res.json({
-      success: true,
-      message: "Admin wallet updated"
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
+        return res.status(500).json({
+            success: false,
+            message: err.message
+        });
+    }
 });
 
 // ================= SERVER =================
 
-const PORT = process.env.PORT || 5000;
-
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+    console.log(`Server Running On ${PORT}`);
 });
 ```
 
----
+# .env
 
-# PACKAGE.JSON START SCRIPT
-
-```json
-"scripts": {
-  "start": "node server.js"
-}
+```env
+PORT=5000
+JWT_SECRET=ZTR_SECRET
+FIREBASE_DB_URL=YOUR_FIREBASE_DATABASE_URL
 ```
 
----
-
-# VERCEL CONFIG (vercel.json)
-
-```json
-{
-  "version": 2,
-  "builds": [
-    {
-      "src": "server.js",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "/server.js"
-    }
-  ]
-}
-```
-
----
-
-# DEPLOY STEPS
-
-## GitHub
-
-1. Upload files
-2. Push repository
-
-## Vercel
-
-1. Import GitHub repo
-2. Add environment variables
-3. Deploy
-
----
-
-# REQUIRED FILES
+# Install Packages
 
 ```bash
-server.js
-package.json
-vercel.json
-.env
-firebase-service-account.json
+npm install express cors dotenv firebase-admin bcryptjs jsonwebtoken uuid
 ```
 
----
+# Run Backend
 
-# IMPORTANT
-
-Do NOT store private keys inside frontend.
-
-Only backend should handle:
-
-* Firebase Admin
-* Withdrawals
-* USDT Transfers
-* Admin Wallet
-* Bot Approvals
-* Database Writes
-
-Frontend should only call API endpoints.
-
----
-
-# ADVANCED PRODUCTION BACKEND FEATURES
-
-The backend is now designed to fully control frontend logic.
-
-## FULL SYSTEM CONTROL
-
-✅ Authentication Control
-✅ Wallet Connection Control
-✅ Referral Engine
-✅ Invite Code Engine
-✅ Airdrop Engine
-✅ Salary Engine
-✅ Team Commission Engine
-✅ Direct Commission Engine
-✅ Upline Commission Engine
-✅ Downline Pool Engine
-✅ Rank Engine
-✅ Level Upgrade Engine
-✅ Platform Stats Engine
-✅ Income History Engine
-✅ Withdrawal Security Engine
-✅ Transaction History Engine
-✅ Admin Config Engine
-✅ Task Reward Engine
-✅ Auto Reward Distribution
-✅ Team Size Auto Update
-✅ Level Stars Tracking
-✅ Salary Fund Tracking
-✅ Connected Wallet Tracking
-✅ Firebase Database Sync
-✅ Admin Protected APIs
-✅ Blockchain Withdrawal Verification
-✅ Frontend Protection
-✅ Centralized Business Logic
-✅ Anti Manipulation Backend
-
----
-
-# FRONTEND SECURITY RULES
-
-Frontend should NEVER:
-
-❌ Calculate commissions
-❌ Calculate rewards
-❌ Calculate salary
-❌ Approve withdrawals
-❌ Update balances
-❌ Update team sizes
-❌ Update platform stats
-❌ Modify earnings
-❌ Modify transaction history
-❌ Modify admin wallet
-❌ Modify ranks
-❌ Modify airdrop points
-
-Backend ONLY controls all business logic.
-
----
-
-# ADD THESE NEW FUNCTIONS INSIDE SERVER.JS
-
-## AIRDROP ENGINE
-
-```javascript
-async function distributeAirdrop(walletAddress, points) {
-  const ref = db.ref(`users/${walletAddress}/airdropPoints`);
-
-  const snap = await ref.once("value");
-
-  const current = snap.val() || 0;
-
-  await ref.set(current + points);
-
-  const statsRef = db.ref("platformStats/totalAirdropDistributed");
-
-  const statsSnap = await statsRef.once("value");
-
-  const total = statsSnap.val() || 0;
-
-  await statsRef.set(total + points);
-}
+```bash
+node index.js
 ```
 
----
-
-## TASK CLAIM ENGINE
-
-```javascript
-app.post("/claim-task", async (req, res) => {
-  try {
-    const { walletAddress, taskId, reward } = req.body;
-
-    const wallet = walletAddress.toLowerCase();
-
-    const taskRef = db.ref(`users/${wallet}/claimedTasks/${taskId}`);
-
-    const taskSnap = await taskRef.once("value");
-
-    if (taskSnap.exists()) {
-      return res.json({
-        success: false,
-        message: "Task already claimed"
-      });
-    }
-
-    await taskRef.set(true);
-
-    await distributeAirdrop(wallet, reward);
-
-    res.json({
-      success: true,
-      message: "Task claimed successfully"
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-```
-
----
-
-## SALARY ENGINE
-
-```javascript
-async function distributeWeeklySalary() {
-  const usersSnap = await db.ref("users").once("value");
-
-  const users = usersSnap.val() || {};
-
-  for (const wallet in users) {
-    const user = users[wallet];
-
-    const level = user.level || 0;
-
-    let salary = 0;
-
-    if (level === 1) salary = 1;
-    if (level === 2) salary = 5;
-    if (level === 3) salary = 10;
-    if (level >= 10) salary = 50;
-
-    if (salary > 0) {
-      await updateBalance(wallet, salary);
-
-      await addIncome(wallet, salary, "Weekly Salary");
-
-      const ref = db.ref(`users/${wallet}/salleryEarnings`);
-
-      const snap = await ref.once("value");
-
-      const current = snap.val() || 0;
-
-      await ref.set(current + salary);
-    }
-  }
-}
-```
-
----
-
-## LEVEL ENGINE
-
-```javascript
-async function checkLevelUpgrade(walletAddress) {
-  const snap = await db.ref(`users/${walletAddress}`).once("value");
-
-  const user = snap.val();
-
-  const teamSize = user.teamSize || 0;
-
-  let level = 0;
-
-  if (teamSize >= 5) level = 1;
-  if (teamSize >= 20) level = 2;
-  if (teamSize >= 50) level = 3;
-  if (teamSize >= 100) level = 4;
-
-  await db.ref(`users/${walletAddress}/level`).set(level);
-}
-```
-
----
-
-## TEAM COMMISSION ENGINE
-
-```javascript
-async function distributeTeamCommission(inviterWallet, amount) {
-  const commission = amount * 0.0222;
-
-  await updateBalance(inviterWallet, commission);
-
-  await addIncome(inviterWallet, commission, "Team Commission");
-}
-```
-
----
-
-## LEVEL STAR ENGINE
-
-```javascript
-async function addLevelStar(walletAddress, sourceUserId, type) {
-  await db
-    .ref(`users/${walletAddress}/levelStars/level_1`)
-    .push({
-      sourceUserId,
-      type,
-      timestamp: Date.now()
-    });
-}
-```
-
----
-
-## PLATFORM STATS ENGINE
-
-```javascript
-async function updatePlatformStats() {
-  const usersSnap = await db.ref("users").once("value");
-
-  const users = usersSnap.val() || {};
-
-  const totalParticipants = Object.keys(users).length;
-
-  let totalDistributed = 0;
-
-  for (const wallet in users) {
-    totalDistributed += users[wallet].ztrBalance || 0;
-  }
-
-  await db.ref("platformStats").update({
-    totalParticipants,
-    totalZTRDistributed: totalDistributed
-  });
-}
-```
-
----
-
-## ADMIN SECURITY MIDDLEWARE
-
-```javascript
-function adminOnly(req, res, next) {
-  const secret = req.headers["x-admin-secret"];
-
-  if (secret !== "SUPER_ADMIN_SECRET") {
-    return res.status(401).json({
-      success: false,
-      message: "Unauthorized"
-    });
-  }
-
-  next();
-}
-```
-
----
-
-# IMPORTANT SECURITY UPGRADE
-
-## NEVER STORE THESE IN FRONTEND
-
-❌ Firebase Admin JSON
-❌ Private Keys
-❌ RPC URLs
-❌ Withdrawal Logic
-❌ Salary Logic
-❌ Reward Calculations
-❌ Commission Logic
-❌ Admin Wallet
-❌ Smart Contract Write Functions
-
-Only backend handles everything.
-
----
-
-# RECOMMENDED FINAL ARCHITECTURE
-
-## FRONTEND
-
-* React / Next.js
-* Wallet Connect
-* API Calls Only
-* No Business Logic
-
-## BACKEND
-
-* Express.js
-* Firebase Admin
-* Ethers.js
-* Cron Jobs
-* Security Middleware
-* Validation
-* Blockchain Transactions
-
-## DATABASE
-
-* Firebase Realtime Database
-
-## BLOCKCHAIN
-
-* BSC Mainnet
-* USDT BEP20
-
----
-
-# FINAL PRODUCTION STATUS
-
-✅ Frontend fully protected
-✅ Backend centralized control
-✅ Salary controlled from backend
-✅ Airdrop controlled from backend
-✅ Withdrawal controlled from backend
-✅ Rewards controlled from backend
-✅ Team system controlled from backend
-✅ Firebase synced
-✅ Blockchain synced
-✅ Admin secured
-✅ History tracking enabled
-✅ Transaction logs enabled
-✅ Anti manipulation structure ready
-✅ Vercel deploy ready
-✅ GitHub ready
-✅ Single file architecture ready
-
----
-
-# FINAL IMPORTANT STEP
-
-REVOKE your old Firebase service account private key immediately and generate a new one before deployment.
+# This Single File Backend Includes
+
+✅ Register
+✅ Login
+✅ JWT Authentication
+✅ User Profile
+✅ Deposit
+✅ Withdraw
+✅ Transaction History
+✅ Income History
+✅ Team History
+✅ Buy Level
+✅ Admin Dashboard
+✅ Firebase Database
+✅ Full Frontend Control
+✅ Stable APIs
+✅ Production Ready
