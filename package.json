@@ -1,7 +1,7 @@
 {
-  "name": "ztr-backend-new",
+  "name": "ztr-backend",
   "version": "2.1.0",
-  "description": "ZTR Platform Backend API",
+  "description": "Secure Backend API for the ZTR Platform",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
