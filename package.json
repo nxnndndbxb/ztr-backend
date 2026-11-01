@@ -1,8 +1,0 @@
-{
-  "name": "ztr-salary-backend",
-  "version": "1.0.0",
-  "description": "ZTR Salary Distribution API",
-  "dependencies": {
-    "firebase-admin": "^12.0.0"
-  }
-}
