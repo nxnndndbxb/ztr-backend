@@ -1,17 +1,12 @@
 {
-  "name": "zic-oil-whatsapp-service",
+  "name": "zic-whatsapp",
   "version": "1.0.0",
-  "description": "FREE WhatsApp auto-sender for ZIC Oil invoices — whatsapp-web.js QR scan, no paid API",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=18"
-  },
   "dependencies": {
     "express": "^4.19.2",
+    "cors": "^2.8.5",
     "qrcode": "^1.5.4",
-    "whatsapp-web.js": "^1.23.0"
+    "@whiskeysockets/baileys": "^6.7.0",
+    "pino": "^9.0.0"
   }
 }
