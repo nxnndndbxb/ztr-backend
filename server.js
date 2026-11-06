@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 
@@ -15,10 +15,19 @@ let isConnected = false;
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+    const { version } = await fetchLatestBaileysVersion();
+    
     sock = makeWASocket({
+        version,
         auth: state,
         printQRInTerminal: false,
-        logger: pino({ level: 'silent' })
+        logger: pino({ level: 'silent' }),
+        // 👇 YEH 2 LINES SABSE ZAROORI HAIN (Waiting error khatam karne ke liye)
+        markOnlineOnConnect: true, 
+        syncFullHistory: false,
+        getMessage: async (key) => {
+            return { conversation: 'hello' }
+        }
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -62,7 +71,7 @@ app.post('/send-invoice', async (req, res) => {
         const media = Buffer.from(imageBase64, 'base64');
 
         await sock.sendMessage(jid, { image: media, caption: caption || '' });
-        console.log(`Message sent to ${jid}`);
+        console.log(`✅ Message sent to ${jid}`);
         res.json({ success: true });
     } catch (error) {
         console.error(error);
@@ -80,5 +89,5 @@ app.post('/logout', async (req, res) => {
 });
 
 app.listen(3001, () => {
-    console.log('Server running on http://localhost:3001');
+    console.log('🚀 Server running on http://localhost:3001');
 });
