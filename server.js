@@ -1,63 +1,42 @@
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, jidNormalizedUser } = require('@whiskeysockets/baileys');
-const pino = require('pino');
-const fs = require('fs');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-let sock = null;
 let qrImage = null;
 let isConnected = false;
 
-// Memory store for messages (helps fix "Waiting for message" on iOS)
-const msgRetryCounterCache = new Map();
+// Yeh background mein Chrome browser chalata hai
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        headless: true, 
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
+});
 
-async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-    const { version } = await fetchLatestBaileysVersion();
-    
-    sock = makeWASocket({
-        version,
-        auth: state,
-        printQRInTerminal: false,
-        logger: pino({ level: 'silent' }),
-        markOnlineOnConnect: true, // Critical for delivery
-        syncFullHistory: false,
-        msgRetryCounterCache,
-        // 👇 YEH FUNCTION iOS "Waiting" ERROR KO FIX KARTA HAI
-        getMessage: async (key) => {
-            return { conversation: 'ZIC Oil Invoice' };
-        }
-    });
+client.on('qr', async (qr) => {
+    qrImage = await QRCode.toDataURL(qr);
+    console.log('QR Code generated. Please scan from admin panel.');
+});
 
-    sock.ev.on('creds.update', saveCreds);
+client.on('ready', () => {
+    isConnected = true;
+    qrImage = null;
+    console.log('✅ WhatsApp Connected Successfully!');
+});
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        
-        if (qr) {
-            qrImage = await QRCode.toDataURL(qr);
-        }
-        if (connection === 'close') {
-            isConnected = false;
-            qrImage = null;
-            const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) {
-                connectToWhatsApp();
-            }
-        } else if (connection === 'open') {
-            console.log('✅ WhatsApp Connected Successfully!');
-            isConnected = true;
-            qrImage = null;
-        }
-    });
-}
+client.on('disconnected', (reason) => {
+    isConnected = false;
+    console.log('❌ WhatsApp Disconnected:', reason);
+    client.initialize(); 
+});
 
-connectToWhatsApp();
+client.initialize();
 
 app.get('/status', (req, res) => {
     res.json({ connected: isConnected, qrImage });
@@ -66,16 +45,18 @@ app.get('/status', (req, res) => {
 app.post('/send-invoice', async (req, res) => {
     try {
         if (!isConnected) return res.status(409).json({ error: 'WhatsApp not connected' });
+        
         const { number, imageBase64, caption } = req.body;
         
-        let jid = number.replace(/\D/g, '');
-        if (jid.startsWith('0')) jid = '92' + jid.slice(1);
-        jid = jidNormalizedUser(jid + '@s.whatsapp.net');
+        let cleanNumber = number.replace(/\D/g, '');
+        if (cleanNumber.startsWith('0')) cleanNumber = '92' + cleanNumber.slice(1);
+        
+        const chatId = cleanNumber + '@c.us';
+        const media = new MessageMedia('image/png', imageBase64, 'invoice.png');
 
-        const media = Buffer.from(imageBase64, 'base64');
-
-        await sock.sendMessage(jid, { image: media, caption: caption || '' });
-        console.log(`✅ Message sent to ${jid}`);
+        await client.sendMessage(chatId, media, { caption: caption || '' });
+        console.log(`✅ Message sent to ${cleanNumber}`);
+        
         res.json({ success: true });
     } catch (error) {
         console.error(error);
@@ -84,11 +65,12 @@ app.post('/send-invoice', async (req, res) => {
 });
 
 app.post('/logout', async (req, res) => {
-    if (sock) await sock.logout();
-    fs.rmSync('auth_info', { recursive: true, force: true });
-    isConnected = false;
-    qrImage = null;
-    connectToWhatsApp();
+    try {
+        await client.logout();
+        isConnected = false;
+        qrImage = null;
+        client.initialize();
+    } catch (e) {}
     res.json({ success: true });
 });
 
