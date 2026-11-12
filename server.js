@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, jidNormalizedUser } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 
@@ -13,6 +13,9 @@ let sock = null;
 let qrImage = null;
 let isConnected = false;
 
+// Memory store for messages (helps fix "Waiting for message" on iOS)
+const msgRetryCounterCache = new Map();
+
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
     const { version } = await fetchLatestBaileysVersion();
@@ -22,11 +25,12 @@ async function connectToWhatsApp() {
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        // 👇 YEH 2 LINES SABSE ZAROORI HAIN (Waiting error khatam karne ke liye)
-        markOnlineOnConnect: true, 
+        markOnlineOnConnect: true, // Critical for delivery
         syncFullHistory: false,
+        msgRetryCounterCache,
+        // 👇 YEH FUNCTION iOS "Waiting" ERROR KO FIX KARTA HAI
         getMessage: async (key) => {
-            return { conversation: 'hello' }
+            return { conversation: 'ZIC Oil Invoice' };
         }
     });
 
@@ -66,7 +70,7 @@ app.post('/send-invoice', async (req, res) => {
         
         let jid = number.replace(/\D/g, '');
         if (jid.startsWith('0')) jid = '92' + jid.slice(1);
-        jid = jid + '@s.whatsapp.net';
+        jid = jidNormalizedUser(jid + '@s.whatsapp.net');
 
         const media = Buffer.from(imageBase64, 'base64');
 
