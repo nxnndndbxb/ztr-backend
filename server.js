@@ -10,11 +10,12 @@ app.use(express.json({ limit: '50mb' }));
 let qrImage = null;
 let isConnected = false;
 
-// Yeh background mein Chrome browser chalata hai
+// Yahan humne aapke PC ka Chrome direct set kar diya hai taake download na karna pade
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-        headless: true, 
+        headless: true,
+        executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 
         args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
 });
